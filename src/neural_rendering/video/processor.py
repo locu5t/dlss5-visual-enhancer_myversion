@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Callable
 
 import av
-import numpy as np
 
 from ...core import ffmpeg
+from ...core.ffmpeg.decoder import decode_mode
 from ...core.gpu_selection import resolve_runtime_ai_gpu
 from ...core.jobs import Cancelled, active_job
 from ...core.naming import output_filename, validate_rename
@@ -25,10 +25,10 @@ from ...core.disk_paths import OutputFile, prepare_output_dir
 from ...core.render_metadata import prepare_render_note
 from ...core.paths import JOBS, LOGS, OUTPUTS
 from ...core.runtime import (
-    DLSSFrameSession, prepare_runtime, resize_fit, rotate_frame, verify_feature_18,
+    DLSSFrameSession, prepare_runtime, verify_feature_18,
     write_failure_report,
 )
-from .guides import TemporalGuideGenerator
+from .pipeline_io import prepare_video_frames, performance_report, resolve_nr_encoder
 from .models import ConversionOptions, ConversionResult, DLSS_MODEL_PRESETS
 from .sizing import resolve_native_settings, resolve_output_size, resolve_upscaling_mode
 
@@ -75,6 +75,7 @@ def convert_video(
     validate_codec_container(options.codec, options.container)
     validate_rename(options.rename_mode, options.custom_suffix)
     preview_seconds, preview_frames = _validate_preview_options(options)
+    decode_mode()  # Validate before booting a native worker or encoder.
     is_preview = preview_seconds is not None or preview_frames is not None
     # Compat previews use the forced H.264 SDR 8-bit path; user-encoded previews
     # (Preview Encoding Auto-playable / Disabled) preserve the HDR choice.
@@ -133,8 +134,9 @@ def convert_video(
         writer_thread: threading.Thread | None = None
         pipeline_stop = threading.Event()
         pipeline_errors: queue.Queue[BaseException] = queue.Queue(maxsize=4)
-        producer_stats: dict[str, float | int | str] = {}
+        producer_stats: dict[str, object] = {}
         writer_stats: dict[str, float | int] = {}
+        pipeline_warnings: list[str] = []
         frame_accounting: dict[str, object] = {"source_verification": "not_required"}
 
         def record_pipeline_error(exc: BaseException) -> None:
@@ -168,13 +170,12 @@ def convert_video(
             output_width, output_height = resolve_output_size(
                 input_width, input_height, factor
             )
-            video_gpu = ffmpeg.resolve_video_gpu(
-                prepared_runtime.gpus,
-                options.video_gpu_uuid,
-                "H.264" if compat_preview else options.codec,
-                output_width,
-                output_height,
+            gpu_probe_started = time.perf_counter()
+            encoding_codec, video_gpu = resolve_nr_encoder(
+                prepared_runtime.gpus, options.video_gpu_uuid, options.codec,
+                output_width, output_height, compat_preview, pipeline_warnings,
             )
+            timings["video_gpu_probe_seconds"] = time.perf_counter() - gpu_probe_started
             # HDR metadata to copy – 10-bit path when HDR Mode is on
             hdr_metadata = None
             effective_hdr = hdr_requested and (not is_preview or not compat_preview)
@@ -226,7 +227,7 @@ def convert_video(
                     encoder_setup.append(
                         ffmpeg.start_encoder(
                             temp_video,
-                            options.codec,
+                            encoding_codec,
                             options.quality,
                             controller,
                             output_width,
@@ -320,65 +321,20 @@ def convert_video(
                 return False
 
             def produce_frames() -> None:
-                producer_started = time.perf_counter()
-                decoded = 0
-                container = None
                 try:
-                    container = av.open(str(source))
-                    stream = container.streams.video[0]
-                    stream.thread_type = "AUTO"
-                    guides = TemporalGuideGenerator(render_width, render_height)
-                    first_time: float | None = None
-                    rate = float(stream.average_rate or 30)
-                    for index, frame in enumerate(container.decode(stream)):
-                        if controller.cancel.is_set():
-                            raise Cancelled("Render stopped by user.")
-                        if pipeline_stop.is_set():
-                            return
-                        if preview_frames is not None and index >= preview_frames:
-                            producer_stats["completion_reason"] = "preview_limit"
-                            break
-                        if preview_seconds is not None:
-                            timestamp = (
-                                float(frame.pts * stream.time_base)
-                                if frame.pts is not None and stream.time_base is not None
-                                else decoded / rate
-                            )
-                            if first_time is None:
-                                first_time = timestamp
-                            if decoded and timestamp - first_time >= preview_seconds:
-                                producer_stats["completion_reason"] = "preview_limit"
-                                break
-                        if frame.is_corrupt:
-                            raise RuntimeError(f"The video decoder marked source frame {index} as corrupt.")
-                        rgba = rotate_frame(
-                            frame.to_ndarray(format="rgba"), metadata["rotation"]
-                        )
-                        if rgba.shape[1] != render_width or rgba.shape[0] != render_height:
-                            rgba = resize_fit(rgba, render_width, render_height)
-                        rgba = np.ascontiguousarray(rgba, dtype=np.uint8)
-                        guide = guides.process(rgba)
-                        pts = int(frame.pts if frame.pts is not None else index)
-                        if not put_pipeline(
-                            prepared_frames, (index, rgba, guide, pts)
-                        ):
-                            return
-                        decoded += 1
-                    else:
-                        producer_stats["completion_reason"] = "eof"
+                    prepare_video_frames(
+                        source, metadata, gpu, render_width, render_height,
+                        preview_seconds, preview_frames, controller, pipeline_stop,
+                        lambda item: put_pipeline(prepared_frames, item), producer_stats,
+                    )
                     put_pipeline(prepared_frames, stop_marker)
                 except BaseException as exc:
                     record_pipeline_error(exc)
                     put_pipeline(prepared_frames, stop_marker)
-                finally:
-                    producer_stats["decoded_frames"] = decoded
-                    if container is not None:
-                        with suppress(Exception):
-                            container.close()
-                    producer_stats["seconds"] = time.perf_counter() - producer_started
 
             def write_frames() -> None:
                 writer_started = time.perf_counter()
+                active_seconds = 0.0
                 written = 0
                 nut = None
                 try:
@@ -401,21 +357,26 @@ def convert_video(
                         if item is stop_marker:
                             break
                         processed, output_pts = item
+                        feed_started = time.perf_counter()
                         output_frame = av.VideoFrame.from_ndarray(processed, format="rgba")
                         output_frame.pts = output_pts
                         output_frame.time_base = metadata["time_base"]
                         for packet in raw_stream.encode(output_frame):
                             nut.mux(packet)
+                        active_seconds += time.perf_counter() - feed_started
                         written += 1
                     if not pipeline_stop.is_set():
+                        feed_started = time.perf_counter()
                         for packet in raw_stream.encode():
                             nut.mux(packet)
                         nut.close()
+                        active_seconds += time.perf_counter() - feed_started
                         nut = None
                 except BaseException as exc:
                     record_pipeline_error(exc)
                 finally:
                     writer_stats["written_frames"] = written
+                    writer_stats["active_seconds"] = active_seconds
                     if nut is not None:
                         with suppress(Exception):
                             nut.close()
@@ -433,16 +394,21 @@ def convert_video(
             scene_resets = 0
             preview_pts_origin: int | None = None
             dlss_seconds = 0.0
+            timings["native_input_wait_seconds"] = 0.0
+            timings["encoder_queue_wait_seconds"] = 0.0
             last_progress_update = 0.0
             while True:
                 if controller.cancel.is_set():
                     raise Cancelled("Render stopped by user.")
                 if not pipeline_errors.empty():
                     raise pipeline_errors.get_nowait()
+                wait_started = time.perf_counter()
                 try:
                     item = prepared_frames.get(timeout=0.1)
                 except queue.Empty:
                     continue
+                finally:
+                    timings["native_input_wait_seconds"] += time.perf_counter() - wait_started
                 if item is stop_marker:
                     break
                 index, rgba, guide, pts = item
@@ -460,7 +426,10 @@ def convert_video(
                     if preview_pts_origin is None:
                         preview_pts_origin = out_pts
                     out_pts -= preview_pts_origin
-                if not put_pipeline(rendered_frames, (processed, out_pts)):
+                wait_started = time.perf_counter()
+                accepted = put_pipeline(rendered_frames, (processed, out_pts))
+                timings["encoder_queue_wait_seconds"] += time.perf_counter() - wait_started
+                if not accepted:
                     if not pipeline_errors.empty():
                         raise pipeline_errors.get_nowait()
                     raise Cancelled("Render stopped by user.")
@@ -501,12 +470,16 @@ def convert_video(
             timings["encoder_feed_seconds"] = float(writer_stats.get("seconds", 0.0))
             if encoder.stdin and not encoder.stdin.closed:
                 encoder.stdin.close()
+            close_started = time.perf_counter()
             session.close()
+            timings["native_close_seconds"] = time.perf_counter() - close_started
             frame_accounting["worker_completed_frames"] = session.completed_frames
             if session.completed_frames != delivered:
                 raise RuntimeError("Native worker completion does not match the processed frame count.")
+            drain_started = time.perf_counter()
             encoder_code = encoder.wait(timeout=120)
             encoder_log_thread.join(timeout=2)
+            timings["encoder_drain_seconds"] = time.perf_counter() - drain_started
             controller.unregister(encoder)
             timings["encoding_seconds"] = time.perf_counter() - encoding_stage_started
             if encoder_code:
@@ -583,7 +556,9 @@ def convert_video(
             report = {
                 "status": "success",
                 "metadata_embedding": metadata_diagnostics,
-                "warnings": [metadata_diagnostics["warning"]] if metadata_diagnostics.get("warning") else [],
+                "warnings": pipeline_warnings + (
+                    [metadata_diagnostics["warning"]] if metadata_diagnostics.get("warning") else []
+                ),
                 "input": str(source),
                 "output": str(output),
                 "options": asdict(options),
@@ -656,6 +631,9 @@ def convert_video(
                 "elapsed_seconds": elapsed,
                 "average_fps": delivered / elapsed,
                 "timings": timings,
+                "performance": performance_report(
+                    timings, producer_stats, writer_stats, delivered, elapsed, selected_encoder,
+                ),
                 "worker_log": session.worker_logs,
                 "worker_log_dropped_lines": session.worker_log_dropped_lines,
                 "encoder_log": encoder_logs,
