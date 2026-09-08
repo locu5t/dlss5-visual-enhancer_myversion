@@ -7,6 +7,7 @@ import time
 import weakref
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
@@ -22,12 +23,10 @@ _INSTALLED = False
 
 
 class EnhancedPreviewServer:
-    """Serve the latest signed-DLSS output as a low-overhead MJPEG stream.
+    """Serve post-feature-18 frames and a controlled browser viewport.
 
-    Encoding happens on a dedicated thread and the queue retains only the newest
-    frame, so a slow browser preview can never back-pressure the DLSS pipeline.
-    Audio remains on the existing MPV/HLS transport; this endpoint is the visual
-    in-app preview only.
+    JPEG encoding is isolated on a latest-frame queue so the browser can pause,
+    reconnect or enter fullscreen without back-pressuring DLSS processing.
     """
 
     def __init__(self, *, max_width: int = 1280, jpeg_quality: int = 82) -> None:
@@ -43,11 +42,91 @@ class EnhancedPreviewServer:
         self._encode_thread: threading.Thread | None = None
 
     @property
-    def url(self) -> str:
+    def base_url(self) -> str:
         if self._server is None:
             return ""
-        port = int(self._server.server_address[1])
-        return f"http://127.0.0.1:{port}/dlss5.mjpg"
+        return f"http://127.0.0.1:{int(self._server.server_address[1])}"
+
+    @property
+    def url(self) -> str:
+        base = self.base_url
+        return f"{base}/dlss5.mjpg" if base else ""
+
+    @property
+    def viewer_url(self) -> str:
+        base = self.base_url
+        return f"{base}/viewer.html" if base else ""
+
+    def _viewer_page(self, embedded: bool) -> bytes:
+        body_class = "embedded" if embedded else "standalone"
+        page = f'''<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DLSS 5 Enhanced View</title>
+<style>
+html,body{{margin:0;width:100%;height:100%;background:#050607;color:#f4f4f5;font-family:Arial,sans-serif}}
+#shell{{display:flex;flex-direction:column;width:100%;height:100%;background:#050607}}
+#stage{{position:relative;flex:1;min-height:0;display:grid;place-items:center;background:#000;overflow:hidden}}
+#stage img{{width:100%;height:100%;object-fit:contain;background:#000}}
+#badge{{position:absolute;left:12px;top:12px;padding:6px 9px;border-radius:999px;background:rgba(0,0,0,.62);font-size:12px;border:1px solid #2d3137}}
+#controls{{display:flex;gap:8px;align-items:center;padding:8px;background:#111318;border-top:1px solid #2c3037;flex-wrap:wrap}}
+button,a{{background:#242831;color:#fff;border:1px solid #3d424d;border-radius:6px;padding:7px 11px;font:inherit;cursor:pointer;text-decoration:none}}
+button:hover,a:hover{{background:#313744}}
+#state{{margin-left:auto;font-size:12px;color:#a9adb7}}
+body.embedded #controls{{padding:6px}}
+</style>
+</head>
+<body class="{body_class}">
+<div id="shell">
+  <div id="stage">
+    <img id="stream" src="/dlss5.mjpg?t={time.time_ns()}" alt="DLSS 5 enhanced output">
+    <div id="badge">POST-DLSS FEATURE 18</div>
+  </div>
+  <div id="controls">
+    <button id="play">Pause</button>
+    <button id="live">Go Live</button>
+    <button id="snapshot">Snapshot</button>
+    <button id="fullscreen">Fullscreen</button>
+    <a href="/viewer.html" target="_blank" rel="noopener">Pop-out</a>
+    <span id="state">Live</span>
+  </div>
+</div>
+<script>
+(() => {{
+  const img = document.getElementById('stream');
+  const play = document.getElementById('play');
+  const state = document.getElementById('state');
+  let playing = true;
+  function goLive() {{
+    img.src = '/dlss5.mjpg?t=' + Date.now();
+    playing = true; play.textContent = 'Pause'; state.textContent = 'Live';
+  }}
+  function pause() {{
+    img.src = '/snapshot.jpg?t=' + Date.now();
+    playing = false; play.textContent = 'Play'; state.textContent = 'Paused';
+  }}
+  play.addEventListener('click', () => playing ? pause() : goLive());
+  document.getElementById('live').addEventListener('click', goLive);
+  document.getElementById('snapshot').addEventListener('click', () =>
+    window.open('/snapshot.jpg?t=' + Date.now(), '_blank', 'noopener'));
+  document.getElementById('fullscreen').addEventListener('click', async () => {{
+    const stage = document.getElementById('stage');
+    try {{ if (!document.fullscreenElement) await stage.requestFullscreen(); else await document.exitFullscreen(); }} catch (_) {{}}
+  }});
+  document.getElementById('stage').addEventListener('dblclick', async () => {{
+    try {{ await document.getElementById('stage').requestFullscreen(); }} catch (_) {{}}
+  }});
+  document.addEventListener('keydown', (event) => {{
+    if (event.code === 'Space') {{ event.preventDefault(); playing ? pause() : goLive(); }}
+    if (event.key.toLowerCase() === 'f') document.getElementById('fullscreen').click();
+  }});
+}})();
+</script>
+</body>
+</html>'''
+        return page.encode("utf-8")
 
     def start(self) -> None:
         owner = self
@@ -68,24 +147,34 @@ class EnhancedPreviewServer:
                     self.send_header("Content-Length", str(length))
                 self.end_headers()
 
-            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-                route = self.path.split("?", 1)[0]
+            def do_GET(self) -> None:  # noqa: N802
+                parsed = urlparse(self.path)
+                route = parsed.path
+                if route == "/viewer.html":
+                    embedded = parse_qs(parsed.query).get("embedded", ["0"])[0] == "1"
+                    payload = owner._viewer_page(embedded)
+                    self.send_response(200)
+                    self._headers("text/html; charset=utf-8", len(payload))
+                    self.wfile.write(payload)
+                    return
                 if route == "/snapshot.jpg":
                     with owner._condition:
                         jpeg = owner._jpeg
                     if jpeg is None:
+                        payload = b"Waiting for frame"
                         self.send_response(503)
-                        self._headers("text/plain; charset=utf-8", 18)
-                        self.wfile.write(b"Waiting for frame")
+                        self._headers("text/plain; charset=utf-8", len(payload))
+                        self.wfile.write(payload)
                         return
                     self.send_response(200)
                     self._headers("image/jpeg", len(jpeg))
                     self.wfile.write(jpeg)
                     return
                 if route != "/dlss5.mjpg":
+                    payload = b"Not found"
                     self.send_response(404)
-                    self._headers("text/plain; charset=utf-8", 9)
-                    self.wfile.write(b"Not found")
+                    self._headers("text/plain; charset=utf-8", len(payload))
+                    self.wfile.write(payload)
                     return
 
                 self.send_response(200)
@@ -163,8 +252,11 @@ class EnhancedPreviewServer:
                 working = frame
                 if width > self.max_width:
                     ratio = self.max_width / width
-                    target = (self.max_width, max(2, int(round(height * ratio))))
-                    working = cv2.resize(working, target, interpolation=cv2.INTER_AREA)
+                    working = cv2.resize(
+                        working,
+                        (self.max_width, max(2, int(round(height * ratio)))),
+                        interpolation=cv2.INTER_AREA,
+                    )
                 channels = working.shape[2]
                 if channels == 4:
                     bgr = cv2.cvtColor(working, cv2.COLOR_RGBA2BGR)
@@ -177,13 +269,11 @@ class EnhancedPreviewServer:
                 )
                 if not ok:
                     continue
-                payload = encoded.tobytes()
                 with self._condition:
-                    self._jpeg = payload
+                    self._jpeg = encoded.tobytes()
                     self._sequence += 1
                     self._condition.notify_all()
             except Exception:
-                # Browser preview must never stop the signed DLSS pipeline.
                 continue
 
     def stop(self) -> None:
@@ -227,42 +317,49 @@ def _unregister(kind: str, session: Any, server: EnhancedPreviewServer) -> None:
             _ACTIVE.pop(kind, None)
 
 
-def preview_url(kind: str) -> str:
+def _active_server(kind: str) -> EnhancedPreviewServer | None:
     with _REGISTRY_LOCK:
         current = _ACTIVE.get(kind)
         if current is None:
-            return ""
-        session = current[0]()
-        if session is None:
+            return None
+        if current[0]() is None:
             _ACTIVE.pop(kind, None)
-            return ""
-        return current[1].url
+            return None
+        return current[1]
+
+
+def preview_url(kind: str) -> str:
+    server = _active_server(kind)
+    return server.url if server is not None else ""
 
 
 def preview_html(kind: str, title: str = "DLSS 5 enhanced live view") -> str:
-    url = preview_url(kind)
+    server = _active_server(kind)
     title_text = html.escape(title)
-    if not url:
+    if server is None or not server.viewer_url:
         return (
             '<div style="width:100%;aspect-ratio:16/9;background:#08090b;border:1px solid #34363d;'
             'border-radius:8px;display:grid;place-items:center;color:#a9adb7">'
             f'<div><strong>{title_text}</strong><br><span>Start playback to show enhanced frames here.</span></div>'
             "</div>"
         )
-    safe_url = html.escape(url, quote=True)
+    viewer_url = html.escape(server.viewer_url + "?embedded=1", quote=True)
+    popout_url = html.escape(server.viewer_url, quote=True)
     return (
         '<div style="width:100%;background:#08090b;border:1px solid #34363d;border-radius:8px;overflow:hidden">'
-        f'<img src="{safe_url}?t={time.time_ns()}" alt="{title_text}" '
-        'style="display:block;width:100%;aspect-ratio:16/9;object-fit:contain;background:#000">'
+        f'<iframe src="{viewer_url}" title="{title_text}" allow="fullscreen" allowfullscreen '
+        'style="display:block;width:100%;aspect-ratio:16/9;border:0;background:#000"></iframe>'
         "</div>"
         '<div style="font-size:0.85em;color:#9ca3af;margin-top:6px">'
-        "This viewport shows frames after signed DLSS feature 18. Audio/playback controls remain on the existing MPV/HLS path."
+        'The viewport has Pause/Play, Go Live, Snapshot and Fullscreen controls. '
+        f'<a href="{popout_url}" target="_blank" rel="noopener">Open full player</a>. '
+        "Frames enter this viewer only after signed DLSS feature 18 returns."
         "</div>"
     )
 
 
 def install_browser_preview() -> None:
-    """Attach in-app MJPEG preview to Live and Realtime without touching native DLLs."""
+    """Attach controlled in-app preview to Live and Realtime without native DLL changes."""
     global _INSTALLED
     with _INSTALL_LOCK:
         if _INSTALLED:
