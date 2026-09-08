@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import gradio as gr
 
@@ -48,6 +49,12 @@ def change_display_mode(path: str | None, display_mode: str):
     if not path:
         return gr.update()
     return gr.update(value=path, display_mode=DISPLAY_MODES.get(display_mode, "solid"))
+
+
+def sync_native_upload(path: str | None):
+    if not path:
+        return None, _capability_text()
+    return path, f"Loaded {Path(path).name} directly in the native Model3D uploader."
 
 
 def clear_model():
@@ -113,11 +120,11 @@ def build_model_viewer_tab() -> ModelViewerTab:
             )
         with gr.Column(scale=4):
             viewer = gr.Model3D(
-                label="3D viewport",
+                label="3D viewport — default formats can also be dropped here directly",
                 display_mode="solid",
                 clear_color=(0.025, 0.025, 0.035, 1.0),
                 height=720,
-                interactive=False,
+                interactive=True,
             )
             current_path = gr.State(None)
 
@@ -127,6 +134,13 @@ def build_model_viewer_tab() -> ModelViewerTab:
         outputs=[viewer, current_path, status],
         show_progress="full",
         concurrency_limit=1,
+    )
+    viewer.upload(
+        sync_native_upload,
+        inputs=viewer,
+        outputs=[current_path, status],
+        queue=False,
+        show_progress="hidden",
     )
     display_mode.change(
         change_display_mode,
