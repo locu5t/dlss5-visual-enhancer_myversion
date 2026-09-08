@@ -8,13 +8,13 @@ import gradio as gr
 
 from ...core.ffmpeg.preview import (
     is_browser_playable, make_browser_preview, normalize_preview_encoding,
-    resolve_final_preview, wants_compat_preview,
+    resolve_final_preview,
 )
 from ...settings.models import coerce_hdr_mode, parse_automatic_mask
 from ...settings.storage import current_preview_encoding, processing_gpu_settings
 from .models import ConversionOptions
 from .processor import convert_video
-from .pipeline_io import resolve_nr_preview_codec, performance_status
+from .pipeline_io import resolve_nr_preview_codec, nr_wants_compat_preview, performance_status
 
 PREVIEW_SECONDS = 3.0
 
@@ -50,7 +50,7 @@ def _process_video(
         effective_codec, effective_container = resolve_nr_preview_codec(
             codec, container, preview_mode
         )
-        compat_preview = wants_compat_preview(codec, container, preview_mode)
+        compat_preview = nr_wants_compat_preview(codec, container, preview_mode)
     else:
         effective_codec, effective_container = codec, container
         compat_preview = False

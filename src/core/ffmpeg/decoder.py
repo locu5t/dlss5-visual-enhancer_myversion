@@ -19,7 +19,12 @@ from ..paths import FFMPEG
 
 
 def decode_mode(value: str | None = None) -> str:
-    mode = (os.environ.get("DLSS5_VIDEO_DECODE", "auto") if value is None else value).strip().lower()
+    # Keep the launcher switches introduced in PR #4 working. The newer name
+    # wins when both are set, which makes explicit A/B tests predictable.
+    if value is None and "DLSS5_VIDEO_DECODE" not in os.environ:
+        legacy = os.environ.get("DLSS5_CUDA_DECODE", "auto").strip().lower()
+        value = {"on": "cuda", "off": "cpu"}.get(legacy, legacy)
+    mode = (os.environ["DLSS5_VIDEO_DECODE"] if value is None else value).strip().lower()
     if mode not in {"auto", "cuda", "cpu"}:
         raise ValueError("DLSS5_VIDEO_DECODE must be auto, cuda, or cpu.")
     return mode

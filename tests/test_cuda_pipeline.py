@@ -45,8 +45,8 @@ paths = types.ModuleType(PREFIX + ".core.paths")
 paths.FFMPEG = Path("ffmpeg.exe")
 sys.modules[paths.__name__] = paths
 shared_preview = types.ModuleType(PREFIX + ".core.ffmpeg.preview")
-shared_preview.resolve_preview_codec = Mock(return_value=("H.264", "MP4"))
-shared_preview.wants_compat_preview = Mock(return_value=True)
+shared_preview.normalize_preview_encoding = lambda mode: mode if mode in ("Auto", "Always H.264", "Disabled") else "Auto"
+shared_preview.is_user_playable_request = lambda codec, container: container == "MP4" and codec in ("H.264", "H.264 (NVIDIA NVENC)")
 sys.modules[shared_preview.__name__] = shared_preview
 codecs = types.ModuleType(PREFIX + ".core.ffmpeg.codecs")
 codecs._is_nvenc_codec = lambda value: value in {"H.264 (NVIDIA NVENC)", "H.265 (NVIDIA NVENC)", "AV1 (NVIDIA NVENC)"}
@@ -81,6 +81,15 @@ class DecoderPolicyTests(unittest.TestCase):
             self.assertEqual(D.decode_mode(), "auto")
         self.assertEqual(D.decode_mode(" CUDA "), "cuda")
         with self.assertRaises(ValueError): D.decode_mode("gpu0")
+
+    def test_legacy_launcher_modes_remain_supported(self):
+        for old, expected in (("off", "cpu"), ("on", "cuda"), ("auto", "auto")):
+            with patch.dict(os.environ, {"DLSS5_CUDA_DECODE": old}, clear=True):
+                self.assertEqual(D.decode_mode(), expected)
+
+    def test_new_decode_switch_wins_over_legacy(self):
+        with patch.dict(os.environ, {"DLSS5_CUDA_DECODE": "on", "DLSS5_VIDEO_DECODE": "cpu"}, clear=True):
+            self.assertEqual(D.decode_mode(), "cpu")
 
     def test_cuda_device_mapping_and_one_stream(self):
         cmd = D.build_decode_command(Path('G:/My video/test.mp4'), META, GPU)
@@ -209,11 +218,51 @@ class FallbackTests(unittest.TestCase):
 
 class PreviewTests(unittest.TestCase):
     def setUp(self):
-        shared_preview.resolve_preview_codec.reset_mock()
-        shared_preview.resolve_preview_codec.return_value = ("H.264", "MP4")
-        shared_preview.wants_compat_preview.return_value = True
+        self.env = patch.dict(os.environ, {}, clear=True)
+        self.env.start()
+        self.addCleanup(self.env.stop)
         encoder.resolve_video_gpu.reset_mock(side_effect=True)
         encoder.resolve_video_gpu.return_value = GPU
+
+    def test_legacy_fast_preview_optout(self):
+        os.environ["DLSS5_FAST_PREVIEW_NVENC"] = "0"
+        self.assertEqual(P.resolve_nr_preview_codec("H.265 (NVIDIA NVENC)", "MP4", "Auto"), ("H.264", "MP4"))
+
+    def test_explicit_cpu_preserved_with_fast_launcher(self):
+        os.environ["DLSS5_FAST_PREVIEW_NVENC"] = "1"
+        self.assertEqual(P.resolve_nr_preview_codec("H.265", "MP4", "Auto"), ("H.264", "MP4"))
+
+    def test_compatibility_flag_is_independent_of_encoder(self):
+        os.environ["DLSS5_FAST_PREVIEW_NVENC"] = "1"
+        self.assertTrue(P.nr_wants_compat_preview("H.265 (NVIDIA NVENC)", "MP4", "Auto"))
+        self.assertFalse(P.nr_wants_compat_preview("H.264 (NVIDIA NVENC)", "MP4", "Auto"))
+        self.assertFalse(P.nr_wants_compat_preview("AV1", "MKV", "Disabled"))
+
+    def test_initializer_does_not_install_legacy_threadlocal_proxy(self):
+        import ast
+        code = ast.parse((ROOT / "src/neural_rendering/video/__init__.py").read_text())
+        calls = [node for node in ast.walk(code) if isinstance(node, ast.Call)]
+        self.assertFalse(any(isinstance(node.func, ast.Name) and node.func.id == "install_cuda_decode" for node in calls))
+
+    def test_producer_thread_receives_gpu_explicitly(self):
+        received, stats, errors = [], {}, []
+        def frames(source, metadata, gpu, controller, stop, diagnostics):
+            received.append((gpu["uuid"], threading.get_ident()))
+            yield frame()
+        def run():
+            try:
+                P.prepare_video_frames(Path("x"), META, GPU, 128, 64, None, None,
+                    jobs.JobController(), threading.Event(), lambda item: True, stats)
+            except BaseException as exc:
+                errors.append(exc)
+        with patch.object(P, "iter_source_frames", side_effect=frames):
+            worker = threading.Thread(target=run)
+            worker.start()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(received[0][0], "GPU-4090")
+        self.assertNotEqual(received[0][1], threading.get_ident())
 
     def test_nvenc_preview_not_downgraded_to_slow_cpu(self):
         for codec in ("H.265 (NVIDIA NVENC)", "AV1 (NVIDIA NVENC)"):
@@ -223,8 +272,6 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(P.resolve_nr_preview_codec("H.265", "MP4", "Auto"), ("H.264", "MP4"))
 
     def test_disabled_retains_user_codec(self):
-        shared_preview.wants_compat_preview.return_value = False
-        shared_preview.resolve_preview_codec.return_value = ("AV1 (NVIDIA NVENC)", "MKV")
         self.assertEqual(P.resolve_nr_preview_codec("AV1 (NVIDIA NVENC)", "MKV", "Disabled"), ("AV1 (NVIDIA NVENC)", "MKV"))
 
     def test_preview_gpu_resolution_uses_effective_nvenc_codec(self):

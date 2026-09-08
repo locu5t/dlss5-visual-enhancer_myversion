@@ -1,3 +1,6 @@
+# CUDA decoding is integrated in processor -> pipeline_io -> decoder.
+# Do not install the legacy thread-local av proxy: producer threads must receive
+# their GPU and cancellation state explicitly, not inherit caller-thread state.
 from .batch import convert_videos
 from .models import (
     ConversionOptions, ConversionResult, DLSS_MODEL_PRESETS, NR_PRESETS, NR_STYLES,

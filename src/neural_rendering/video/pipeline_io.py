@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from fractions import Fraction
 from pathlib import Path
@@ -9,23 +10,32 @@ from pathlib import Path
 import numpy as np
 
 from ...core.ffmpeg.decoder import iter_source_frames, source_pts
-from ...core.ffmpeg.preview import resolve_preview_codec, wants_compat_preview
+from ...core.ffmpeg.preview import normalize_preview_encoding, is_user_playable_request
 from ...core.ffmpeg.codecs import _is_nvenc_codec
 from ...core.jobs import Cancelled
 from .guides import TemporalGuideGenerator
 
 
-def resolve_nr_preview_codec(codec: str, container: str, mode: object) -> tuple[str, str]:
-    """Keep GPU encoding for browser-compatible NR previews of an NVENC request.
+def nr_wants_compat_preview(codec: str, container: str, mode: object) -> bool:
+    """Describe browser/HDR compatibility, independently of CPU vs GPU choice.
 
-    Explicit CPU requests and Preview Encoding Disabled are never silently
-    changed to hardware codecs. Frame Interpolation/RTX Video are unchanged.
+    The shared helper was changed in PR #4 to mean CPU-only compatibility.
+    NR now resolves its encoder explicitly, so do not inherit that coupling.
     """
-    chosen = resolve_preview_codec(codec, container, mode)
-    if wants_compat_preview(codec, container, mode) and _is_nvenc_codec(codec):
-        return "H.264 (NVIDIA NVENC)", "MP4"
-    return chosen
+    normalized = normalize_preview_encoding(mode)
+    return normalized != "Disabled" and (
+        normalized == "Always H.264" or not is_user_playable_request(codec, container)
+    )
 
+
+def resolve_nr_preview_codec(codec: str, container: str, mode: object) -> tuple[str, str]:
+    """Retain NVENC requests without forcing explicit CPU requests onto a GPU."""
+    if not nr_wants_compat_preview(codec, container, mode):
+        return codec, container
+    # Honour the old launcher's explicit opt-out, including on updated installs.
+    enabled = os.environ.get("DLSS5_FAST_PREVIEW_NVENC", "1").strip().lower()
+    use_nvenc = _is_nvenc_codec(codec) and enabled not in {"0", "false", "no", "off"}
+    return ("H.264 (NVIDIA NVENC)" if use_nvenc else "H.264"), "MP4"
 
 
 def resolve_nr_encoder(gpus, gpu_uuid, codec, width, height, compat_preview, warnings):
