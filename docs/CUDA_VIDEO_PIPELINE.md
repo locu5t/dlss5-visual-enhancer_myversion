@@ -13,6 +13,23 @@ The NR processor also forced CPU GPU-resolution logic for compatibility
 previews. Thus the saved NVENC selection could be lost specifically in previews.
 This is a code-path finding, not proof of how the user's 26 seconds were split.
 
+## Integration with the latest main branch
+
+PR #4 was merged while this update was being tested. Its launcher and shared
+preview changes are retained. This update replaces the NR import-time,
+thread-local `av` monkey patch with direct decoder integration in the producer
+thread. A caller-thread context is not inherited by a new producer thread; GPU
+identity, cancellation and decoder diagnostics are now passed explicitly.
+The legacy `cuda_decode.py` module remains for API compatibility but is no
+longer installed automatically. Do not manually install that legacy wrapper.
+
+The existing `DLSS5_CUDA_DECODE=auto/on/off` launcher variable is supported as
+an alias for auto/cuda/cpu. `DLSS5_VIDEO_DECODE` wins if both variables are set.
+`DLSS5_FAST_PREVIEW_NVENC=0` still opts compatibility previews out of NVENC.
+NR now separates browser/HDR compatibility from its encoder choice, retaining
+explicit CPU choices even when the fast launcher is enabled. New timings are
+in `performance`, not the legacy wrapper's `cuda_decode`/`performance_analysis`.
+
 ## Implemented
 
 - NR compatibility previews of an NVENC request now use H.264 NVENC / MP4 and
@@ -54,7 +71,7 @@ is enough: a clean reinstall/redownload of the runtime is not required.
 
 Alternatively, extract the provided source patch into the portable application
 folder containing `app.py`, `start_4090.bat`, and `bin/`, preserving relative
-paths. Back up the three replaced files first. Do not replace settings, outputs,
+paths. Back up the four replaced source files first. Do not replace settings, outputs,
 or runtime binaries. Start normally with `start_4090.bat`.
 
 CUDA decode policy is controlled by a process environment variable:
@@ -109,7 +126,7 @@ strength, output resolution, frame count, frame order, or warmup settings.
 
 ## Validation
 
-Local Linux/Python 3.13.5, FFmpeg 7.1.5: 40 tests collected, 39 passed, 1 skipped.
+Local Linux/Python 3.13.5, FFmpeg 7.1.5: 47 tests collected, 46 passed, 1 skipped.
 Five real software-FFmpeg NUT transport cases check CFR, fractional rate, VFR,
 nonzero starts, and disabled autorotation, including timestamp equality, RGBA
 format, dimensions and frame counts. Other tests isolate runtime/UI/encoder
@@ -117,7 +134,7 @@ policy dependencies, exercise source logic with fake frames, and use real child
 processes for cancellation/watchdog checks. The direct PyAV/NUT bridge test was
 skipped because PyAV is not installed in the test environment; it is included
 for the packaged Windows Python, which already contains PyAV. Python syntax
-checks passed for all six new/modified Python files.
+checks passed for all seven new/modified Python files.
 
 No Windows 10 / RTX 4090 / actual NVDEC / actual NVENC / native DLSS speed or
 visual-quality benchmark was run here. There is no claimed end-to-end speedup
