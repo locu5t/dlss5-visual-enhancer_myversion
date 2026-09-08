@@ -30,6 +30,8 @@ from src.core.runtime import prepare_runtime
 from src.core.terminal import init_console
 from src.frame_interpolation.ui import build_frame_interpolation_tab
 from src.live.ui import build_live_tab
+from src.realtime.ui import build_realtime_tab
+from src.model_viewer.ui import build_model_viewer_tab
 from src.neural_rendering.image.decoder import initialize_image_runtime
 from src.neural_rendering.ui import build_neural_rendering_tab
 from src.settings.ui import bind_settings_events, build_settings_tab, initialize_settings
@@ -227,6 +229,10 @@ def build_app() -> gr.Blocks:
                 frame_tab = build_frame_interpolation_tab(settings)
             with gr.Tab("Live", id="live"):
                 live_tab = build_live_tab(settings)
+            with gr.Tab("Realtime", id="realtime"):
+                build_realtime_tab(settings)
+            with gr.Tab("3D Viewer", id="model-viewer"):
+                build_model_viewer_tab()
             with gr.Tab("Settings", id="settings"):
                 settings_tab = build_settings_tab(settings, ai_gpu_choices, video_gpu_choices)
             with gr.Tab("About", id="about"):
@@ -252,6 +258,11 @@ def main() -> None:
         from src.live.pipeline import sweep_stale_live_dirs
 
         sweep_stale_live_dirs()
+    except Exception:
+        pass
+    try:
+        from src.model_viewer.converter import clean_model_cache
+        clean_model_cache()
     except Exception:
         pass
     # Remove stale Gradio caches / temp leftovers from previous (possibly
