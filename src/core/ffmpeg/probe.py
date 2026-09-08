@@ -96,7 +96,7 @@ def probe_video(
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=index,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,duration,nb_frames,nb_read_frames,nb_read_packets,color_primaries,color_transfer,color_space:stream_tags=rotate:stream_side_data=rotation",
+            "stream=index,codec_name,width,height,avg_frame_rate,r_frame_rate,time_base,duration,nb_frames,nb_read_frames,nb_read_packets,pix_fmt,field_order,color_range,color_primaries,color_transfer,color_space:stream_tags=rotate:stream_side_data=rotation",
             "-show_entries",
             "format=duration,format_name",
             "-of",
@@ -165,6 +165,9 @@ def probe_video(
         "color_transfer": transfer,
         "color_primaries": primaries,
         "color_space": color_space,
+        "pix_fmt": stream.get("pix_fmt") or "unknown",
+        "field_order": stream.get("field_order") or "unknown",
+        "color_range": stream.get("color_range") or "unknown",
         "hdr": transfer in {"smpte2084", "arib-std-b67"},
     }
 

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import traceback
+import time
 from pathlib import Path
 
 import gradio as gr
 
 from ...core.ffmpeg.preview import (
     is_browser_playable, make_browser_preview, normalize_preview_encoding,
-    resolve_final_preview, resolve_preview_codec, wants_compat_preview,
+    resolve_final_preview, wants_compat_preview,
 )
 from ...settings.models import coerce_hdr_mode, parse_automatic_mask
 from ...settings.storage import current_preview_encoding, processing_gpu_settings
 from .models import ConversionOptions
 from .processor import convert_video
+from .pipeline_io import resolve_nr_preview_codec, performance_status
 
 PREVIEW_SECONDS = 3.0
 
@@ -45,7 +47,7 @@ def _process_video(
         preview_mode = "Auto"
     preview_mode = normalize_preview_encoding(preview_mode)
     if is_preview:
-        effective_codec, effective_container = resolve_preview_codec(
+        effective_codec, effective_container = resolve_nr_preview_codec(
             codec, container, preview_mode
         )
         compat_preview = wants_compat_preview(codec, container, preview_mode)
@@ -86,6 +88,7 @@ def _process_video(
     except Exception as exc:
         traceback.print_exc()
         return None, f"Failed: {exc}"
+    stage_note = performance_status(result.report_path)
     source_name = Path(input_path).name
     if is_preview:
         # Truncated previews normally show the encoded file directly. In Auto
@@ -100,40 +103,42 @@ def _process_video(
                 playable = False
             if not playable:
                 try:
+                    browser_started = time.perf_counter()
                     output_preview = make_browser_preview(result.output_path)
-                    derived_note = " (browser preview transcoded to H.264)"
+                    derived_note = f" (additional browser transcode: {time.perf_counter() - browser_started:.2f}s)"
                 except Exception:
                     output_preview = result.output_path
         if preview_frames is not None:
             return output_preview, (
-                f"One-frame preview complete for {source_name} on {result.gpu} "
+                f"One-frame preview complete for {source_name} with requested GPU {result.gpu} "
                 f"in {result.elapsed_seconds:.1f}s. "
                 f"DLSS {result.dlss_mode}: {result.render_width}×{result.render_height} → "
                 f"{result.output_width}×{result.output_height}. Signed feature 18 confirmed."
-                f"{derived_note}"
+                f"{derived_note}{stage_note}"
             )
         return output_preview, (
             f"Preview complete for {source_name}: {result.frames} frames from the first "
             f"{PREVIEW_SECONDS:g} seconds processed "
-            f"on {result.gpu} in {result.elapsed_seconds:.1f}s. DLSS {result.dlss_mode}: "
+            f"with requested GPU {result.gpu} in {result.elapsed_seconds:.1f}s. DLSS {result.dlss_mode}: "
             f"{result.render_width}×{result.render_height} → {result.output_width}×{result.output_height}. "
             "All frames returned success with signed feature 18 confirmed."
-            f"{derived_note}"
+            f"{derived_note}{stage_note}"
         )
+    browser_started = time.perf_counter()
     output_preview, used_derivative = resolve_final_preview(
         result.output_path, preview_mode
     )
     status = (
-        f"Complete: {result.frames} frames processed on {result.gpu} in {result.elapsed_seconds:.1f}s. "
+        f"Complete: {result.frames} frames processed with requested GPU {result.gpu} in {result.elapsed_seconds:.1f}s. "
         f"All {result.nr_count_evidence} frames returned success with signed feature 18 confirmed. "
         f"DLSS {result.dlss_mode}: {result.render_width}×{result.render_height} → "
         f"{result.output_width}×{result.output_height}."
     )
     if used_derivative:
-        status += " Browser preview transcoded to H.264; the original file is unchanged."
+        status += f" Additional browser transcode: {time.perf_counter() - browser_started:.2f}s; original unchanged."
     elif output_preview is None:
         status += f" {effective_container} output was created successfully, but browser preview is unavailable."
-    return output_preview, status
+    return output_preview, status + stage_note
 
 def normalize_video_paths(paths: list[str] | str | None) -> list[str]:
     if not paths:
