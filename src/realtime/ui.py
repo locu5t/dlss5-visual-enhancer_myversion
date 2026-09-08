@@ -9,6 +9,7 @@ import gradio as gr
 from ..core.paths import LOGS
 from ..settings.models import UISettings, parse_automatic_mask
 from ..neural_rendering.video.ui import build_dlss_model_control, build_neural_controls
+from ..live.browser_preview import install_browser_preview, preview_html
 from .models import (
     REALTIME_FPS_CHOICES,
     REALTIME_GUIDE_CHOICES,
@@ -24,6 +25,10 @@ from .pipeline import (
     stop_realtime_session,
 )
 
+# Install after both Live and Realtime pipeline modules are imported. The hook is
+# idempotent and only publishes frames from Live/Realtime worker threads.
+install_browser_preview()
+
 
 def _log_realtime_error(stage: str, exc: BaseException) -> str:
     try:
@@ -35,6 +40,44 @@ def _log_realtime_error(stage: str, exc: BaseException) -> str:
         return str(path)
     except Exception:
         return str(LOGS / "optional_features.log")
+
+
+def _format_realtime_status(info) -> str:
+    if not info.running and info.status == "Idle.":
+        return (
+            "Idle. Direct mode sends enhanced frames straight to MPV with no "
+            "HLS segmenting or output re-encode."
+        )
+    lines = [info.status]
+    if info.source_size:
+        lines.append(
+            f"Source {info.source_size} → DLSS input {info.input_size} → "
+            f"direct output {info.output_size}"
+        )
+    if info.requested_gpu:
+        lines.append(
+            f"Requested AI GPU: {info.requested_gpu}. Native worker adapter binding "
+            "is not independently verified."
+        )
+    if info.source_fps:
+        lines.append(
+            f"Source {info.source_fps:.2f} fps | target {info.target_fps:.2f} fps | "
+            f"effective {info.effective_fps:.2f} fps"
+        )
+        lines.append(
+            f"Motion guides {info.guide_ms:.1f} ms | signed DLSS roundtrip "
+            f"{info.dlss_ms:.1f} ms | direct player transport {info.transport_ms:.1f} ms"
+        )
+    if info.player_running:
+        lines.append(
+            f"MPV direct player: running | dropped {info.player_dropped_frames} | "
+            f"A/V offset {info.av_sync_ms:+.1f} ms"
+        )
+    if info.feature_18_confirmed:
+        lines.append("Signed NVIDIA feature 18 confirmed. The in-app viewport is showing post-DLSS frames.")
+    if info.report_path:
+        lines.append(f"Diagnostics: {info.report_path}")
+    return "\n".join(lines)
 
 
 def start_realtime(
@@ -54,7 +97,7 @@ def start_realtime(
     max_height: str,
     target_fps: str,
     guide_quality: str,
-) -> str:
+) -> tuple[str, str]:
     if is_realtime_running():
         raise gr.Error("A realtime DLSS session is already running; Stop it first.")
     if source_mode == "Local":
@@ -92,52 +135,20 @@ def start_realtime(
         dlss_model_preset=dlss_model_preset,
     )
     try:
-        return start_realtime_session(options).status
+        info = start_realtime_session(options)
     except RuntimeError as exc:
         raise gr.Error(str(exc)) from exc
+    return _format_realtime_status(info), preview_html("realtime", "Realtime DLSS 5 enhanced output")
 
 
-def stop_realtime() -> str:
-    return stop_realtime_session().status
+def stop_realtime() -> tuple[str, str]:
+    info = stop_realtime_session()
+    return _format_realtime_status(info), preview_html("realtime", "Realtime DLSS 5 enhanced output")
 
 
-def refresh_realtime_status() -> str:
+def refresh_realtime_status() -> tuple[str, str]:
     info = realtime_status()
-    if not info.running and info.status == "Idle.":
-        return (
-            "Idle. Direct mode sends enhanced frames straight to MPV with no "
-            "HLS segmenting or output re-encode."
-        )
-    lines = [info.status]
-    if info.source_size:
-        lines.append(
-            f"Source {info.source_size} → DLSS input {info.input_size} → "
-            f"direct output {info.output_size}"
-        )
-    if info.requested_gpu:
-        lines.append(
-            f"Requested AI GPU: {info.requested_gpu}. Native worker adapter binding "
-            "is not independently verified."
-        )
-    if info.source_fps:
-        lines.append(
-            f"Source {info.source_fps:.2f} fps | target {info.target_fps:.2f} fps | "
-            f"effective {info.effective_fps:.2f} fps"
-        )
-        lines.append(
-            f"Motion guides {info.guide_ms:.1f} ms | signed DLSS roundtrip "
-            f"{info.dlss_ms:.1f} ms | direct player transport {info.transport_ms:.1f} ms"
-        )
-    if info.player_running:
-        lines.append(
-            f"MPV direct player: running | dropped {info.player_dropped_frames} | "
-            f"A/V offset {info.av_sync_ms:+.1f} ms"
-        )
-    if info.feature_18_confirmed:
-        lines.append("Signed NVIDIA feature 18 confirmed.")
-    if info.report_path:
-        lines.append(f"Diagnostics: {info.report_path}")
-    return "\n".join(lines)
+    return _format_realtime_status(info), preview_html("realtime", "Realtime DLSS 5 enhanced output")
 
 
 @dataclass(slots=True)
@@ -153,6 +164,8 @@ class RealtimeTab:
     guide_quality: object
     start: object
     stop: object
+    refresh: object
+    preview: object
     status: object
 
 
@@ -161,11 +174,10 @@ def _build_realtime_tab_impl(settings: UISettings) -> RealtimeTab:
     gr.Markdown(
         "### Direct low-latency DLSS playback\n"
         "Unlike the buffered Live tab, this path does **not** wait for HLS segments "
-        "and does **not** re-encode enhanced video. Signed feature-18 frames are "
-        "muxed as raw RGBA + PCM audio directly into the bundled MPV window. "
-        "This removes seconds of segment/buffer latency, but the existing native "
-        "worker still exchanges host-memory buffers, so it is not a game-engine "
-        "zero-copy swapchain."
+        "and does **not** re-encode enhanced video before the direct MPV path. "
+        "The viewport on the right is a separate low-overhead MJPEG monitor fed from "
+        "the frames returned by signed DLSS feature 18, so you can see the enhanced "
+        "result inside the web UI while it runs."
     )
     with gr.Row():
         with gr.Column(scale=3):
@@ -216,10 +228,6 @@ def _build_realtime_tab_impl(settings: UISettings) -> RealtimeTab:
                     choices=list(REALTIME_FPS_CHOICES),
                     value="Auto",
                     label="Realtime frame rate",
-                    info=(
-                        "Auto samples source frames when feature-18 processing cannot "
-                        "sustain the source cadence; media timestamps are preserved."
-                    ),
                 )
                 guide_quality = gr.Dropdown(
                     choices=list(REALTIME_GUIDE_CHOICES),
@@ -229,14 +237,19 @@ def _build_realtime_tab_impl(settings: UISettings) -> RealtimeTab:
             with gr.Row():
                 start = gr.Button("Start Realtime DLSS", variant="primary")
                 stop = gr.Button("Stop", variant="stop")
-        with gr.Column(scale=3):
+                refresh = gr.Button("Refresh Status")
+        with gr.Column(scale=4):
+            gr.Markdown("### DLSS 5 enhanced live viewport")
+            preview = gr.HTML(
+                value=preview_html("realtime", "Realtime DLSS 5 enhanced output")
+            )
             status = gr.Textbox(
                 label="Realtime status",
                 value=(
                     "Idle. Direct mode sends enhanced frames straight to MPV with no "
                     "HLS segmenting or output re-encode."
                 ),
-                lines=12,
+                lines=10,
                 interactive=False,
             )
 
@@ -252,6 +265,8 @@ def _build_realtime_tab_impl(settings: UISettings) -> RealtimeTab:
         guide_quality,
         start,
         stop,
+        refresh,
+        preview,
         status,
     )
     start.click(
@@ -267,25 +282,27 @@ def _build_realtime_tab_impl(settings: UISettings) -> RealtimeTab:
             target_fps,
             guide_quality,
         ],
-        outputs=status,
+        outputs=[status, preview],
         concurrency_limit=1,
         show_progress="full",
     )
-    stop.click(stop_realtime, outputs=status, queue=False, show_progress="hidden")
+    stop.click(
+        stop_realtime,
+        outputs=[status, preview],
+        queue=False,
+        show_progress="hidden",
+    )
+    refresh.click(
+        refresh_realtime_status,
+        outputs=[status, preview],
+        queue=False,
+        show_progress="hidden",
+    )
 
-    # Gradio Timer is optional across portable builds. When absent, the session
-    # can still start/stop; only automatic status refresh is disabled.
-    timer_cls = getattr(gr, "Timer", None)
-    if timer_cls is not None:
-        timer = timer_cls(0.25)
-        tick = getattr(timer, "tick", None)
-        if callable(tick):
-            tick(
-                refresh_realtime_status,
-                outputs=status,
-                queue=False,
-                show_progress="hidden",
-            )
+    # Deliberately no gr.Timer here. The bundled portable Gradio build supplied
+    # by the user throws "'float' object has no attribute 'is_set'" from Timer
+    # events. The MJPEG viewport updates independently in the browser; status is
+    # refreshed manually without involving Timer internals.
     return tab
 
 
