@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 import gradio as gr
 
+from ..core.paths import LOGS
 from .converter import UPLOAD_EXTENSIONS, prepare_for_viewer, viewer_capabilities
 
 
@@ -13,6 +15,19 @@ DISPLAY_MODES = {
     "Wireframe": "wireframe",
     "Point cloud": "point_cloud",
 }
+
+
+def _log_viewer_error(stage: str, exc: BaseException) -> str:
+    """Persist optional-viewer failures without preventing the web host from starting."""
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        path = LOGS / "optional_features.log"
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(f"\n[3D Viewer / {stage}] {type(exc).__name__}: {exc}\n")
+            stream.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        return str(path)
+    except Exception:
+        return str(LOGS / "optional_features.log")
 
 
 def _capability_text() -> str:
@@ -73,7 +88,42 @@ class ModelViewerTab:
     status: object
 
 
-def build_model_viewer_tab() -> ModelViewerTab:
+def _create_model3d_component():
+    """Create Model3D across old/new Gradio builds shipped in portable releases."""
+    component = getattr(gr, "Model3D", None)
+    if component is None:
+        raise RuntimeError(
+            f"This portable Gradio build ({getattr(gr, '__version__', 'unknown')}) has no Model3D component."
+        )
+
+    attempts = (
+        dict(
+            label="3D viewport — default formats can also be dropped here directly",
+            display_mode="solid",
+            clear_color=(0.025, 0.025, 0.035, 1.0),
+            height=720,
+            interactive=True,
+        ),
+        # Older Model3D releases did not expose every modern constructor option.
+        dict(
+            label="3D viewport",
+            display_mode="solid",
+            height=720,
+            interactive=True,
+        ),
+        dict(label="3D viewport", height=720),
+        dict(label="3D viewport"),
+    )
+    errors: list[str] = []
+    for kwargs in attempts:
+        try:
+            return component(**kwargs)
+        except TypeError as exc:
+            errors.append(str(exc))
+    raise RuntimeError("Could not construct Model3D with this Gradio build: " + " | ".join(errors))
+
+
+def _build_model_viewer_tab_impl() -> ModelViewerTab:
     gr.Markdown(
         "### 3D Model Viewer\n"
         "Interactive orbit/pan/zoom viewer for all Model3D default formats "
@@ -83,15 +133,17 @@ def build_model_viewer_tab() -> ModelViewerTab:
     )
     with gr.Row():
         with gr.Column(scale=2):
+            # Do not make application startup depend on Gradio's MIME/extension
+            # allow-list. prepare_for_viewer() remains the authoritative validator.
             files = gr.File(
                 label="3D model + companion files",
                 file_count="multiple",
-                file_types=list(UPLOAD_EXTENSIONS),
+                file_types=None,
                 type="filepath",
                 interactive=True,
                 info=(
                     "For OBJ/GLTF, upload MTL/BIN/textures alongside the primary file. "
-                    "The loader can pack multi-file assets into one GLB when a converter is available."
+                    "The loader validates supported 3D extensions and can pack multi-file assets into GLB."
                 ),
             )
             display_mode = gr.Radio(
@@ -113,19 +165,13 @@ def build_model_viewer_tab() -> ModelViewerTab:
                 lines=8,
             )
             gr.Markdown(
-                "**Supported upload extensions:** "
+                "**Supported model extensions:** "
                 + ", ".join(f"`{ext}`" for ext in UPLOAD_EXTENSIONS)
                 + "\n\nConversion never enables embedded model scripts. Blender is launched "
                 "with auto-execution disabled."
             )
         with gr.Column(scale=4):
-            viewer = gr.Model3D(
-                label="3D viewport — default formats can also be dropped here directly",
-                display_mode="solid",
-                clear_color=(0.025, 0.025, 0.035, 1.0),
-                height=720,
-                interactive=True,
-            )
+            viewer = _create_model3d_component()
             current_path = gr.State(None)
 
     load.click(
@@ -135,13 +181,20 @@ def build_model_viewer_tab() -> ModelViewerTab:
         show_progress="full",
         concurrency_limit=1,
     )
-    viewer.upload(
-        sync_native_upload,
-        inputs=viewer,
-        outputs=[current_path, status],
-        queue=False,
-        show_progress="hidden",
-    )
+
+    # The upload event was added to Model3D in newer Gradio releases. Treat it
+    # as an enhancement, not a startup requirement. The left-side file loader
+    # continues to work when this event is absent.
+    upload = getattr(viewer, "upload", None)
+    if callable(upload):
+        upload(
+            sync_native_upload,
+            inputs=viewer,
+            outputs=[current_path, status],
+            queue=False,
+            show_progress="hidden",
+        )
+
     display_mode.change(
         change_display_mode,
         inputs=[current_path, display_mode],
@@ -165,3 +218,18 @@ def build_model_viewer_tab() -> ModelViewerTab:
         current_path,
         status,
     )
+
+
+def build_model_viewer_tab() -> ModelViewerTab | None:
+    """Never let an optional viewer/Gradio mismatch take down the whole web host."""
+    try:
+        return _build_model_viewer_tab_impl()
+    except Exception as exc:
+        log_path = _log_viewer_error("build", exc)
+        gr.Markdown(
+            "### 3D Viewer unavailable\n"
+            f"The main DLSS application is still usable. This portable Gradio build could not "
+            f"initialize the optional 3D viewer: `{type(exc).__name__}: {exc}`\n\n"
+            f"Diagnostic: `{log_path}`"
+        )
+        return None

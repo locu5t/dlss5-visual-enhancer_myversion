@@ -49,5 +49,27 @@ if "%~1"=="" (
 )
 
 set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" pause
+if not "%RC%"=="0" (
+    echo.
+    echo ================================================================
+    echo DLSS 5 web host exited with code %RC%.
+    echo ================================================================
+    if exist "%~dp0logs\startup_error.log" (
+        echo.
+        echo ---- logs\startup_error.log ----
+        type "%~dp0logs\startup_error.log"
+    )
+    if exist "%~dp0logs\app.log" (
+        echo.
+        echo ---- logs\app.log ----
+        powershell.exe -NoLogo -NoProfile -Command "Get-Content -LiteralPath '%~dp0logs\app.log' -Tail 80"
+    )
+    if exist "%~dp0logs\optional_features.log" (
+        echo.
+        echo ---- logs\optional_features.log ----
+        powershell.exe -NoLogo -NoProfile -Command "Get-Content -LiteralPath '%~dp0logs\optional_features.log' -Tail 80"
+    )
+    echo.
+    pause
+)
 exit /b %RC%
