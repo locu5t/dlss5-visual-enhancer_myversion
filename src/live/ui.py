@@ -7,10 +7,53 @@ import gradio as gr
 
 from ..settings.models import UISettings, parse_automatic_mask
 from ..neural_rendering.video.ui import build_dlss_model_control, build_neural_controls
-from .models import (LIVE_FPS_CHOICES, LIVE_GUIDE_CHOICES, LIVE_MAX_HEIGHT_CHOICES,
-                     LIVE_MAX_HEIGHTS, LIVE_SEGMENT_CHOICES, LIVE_SOURCE_QUALITY_CHOICES)
+from .browser_preview import preview_html
+from .models import (
+    LIVE_FPS_CHOICES,
+    LIVE_GUIDE_CHOICES,
+    LIVE_MAX_HEIGHT_CHOICES,
+    LIVE_MAX_HEIGHTS,
+    LIVE_SEGMENT_CHOICES,
+    LIVE_SOURCE_QUALITY_CHOICES,
+    LiveOptions,
+)
 from .pipeline import is_live_running, live_status, start_live_session, stop_live_session
-from .models import LiveOptions
+
+
+def _format_live_status(info) -> str:
+    if not info.running and info.status == "Idle.":
+        return "Idle. Enter a source and press Start Live."
+    parts = [info.status]
+    if info.playlist_url:
+        parts.append(f"Playlist: {info.playlist_url}")
+    if info.mpv_running:
+        parts.append(
+            f"MPV: {info.player_dropped_frames} dropped | {info.rebuffer_events} rebuffer events | "
+            f"A/V offset {info.av_sync_ms:+.1f} ms"
+        )
+    if info.output_size:
+        parts.append(
+            f"Received {info.source_size} -> Processing {info.input_size} -> "
+            f"Output {info.output_size} | {info.encoder}"
+        )
+    if info.source_quality_note:
+        parts.append(info.source_quality_note)
+    parts.append(f"DLSS effects: {info.effects_status}")
+    if info.applied_at_pts is not None:
+        parts.append(
+            f"Latest applied change starts at video time {info.applied_at_pts / 90000:.2f}s; "
+            "buffered video keeps its previous appearance until then."
+        )
+    if info.effects_error:
+        parts.append(f"Effect update: {info.effects_error}")
+    if info.processing and info.source_fps:
+        parts.append(
+            f"Source: {info.source_fps:.2f} fps. Motion guides: {info.guide_ms:.1f} ms | "
+            f"DLSS: {info.dlss_ms:.1f} ms | Encode transport: {info.encode_ms:.1f} ms"
+        )
+    if info.report_path:
+        parts.append(f"Diagnostics: {info.report_path}")
+    return "\n".join(parts)
 
 
 def start_live(
@@ -33,7 +76,7 @@ def start_live(
     source_quality: str = "Auto",
     source_mode: str = "Online",
     local_video: str | None = None,
-) -> str:
+) -> tuple[str, str]:
     if is_live_running():
         raise gr.Error("A Live session is already running; Stop it first.")
     if source_mode == "Local":
@@ -85,43 +128,20 @@ def start_live(
         info = start_live_session(options)
     except RuntimeError as exc:
         raise gr.Error(str(exc)) from exc
-    return info.status
+    return _format_live_status(info), preview_html("live", "Live DLSS 5 enhanced output")
 
 
-def stop_live() -> str:
+def stop_live() -> tuple[str, str]:
     try:
         info = stop_live_session()
     except RuntimeError as exc:
         raise gr.Error(str(exc)) from exc
-    return info.status
+    return _format_live_status(info), preview_html("live", "Live DLSS 5 enhanced output")
 
 
-def refresh_live_status() -> str:
+def refresh_live_status() -> tuple[str, str]:
     info = live_status()
-    if not info.running and info.status == "Idle.":
-        return "Idle. Enter a source and press Start Live."
-    parts = [info.status]
-    if info.playlist_url:
-        parts.append(f"Playlist: {info.playlist_url}")
-    if info.mpv_running:
-        parts.append(f"MPV: {info.player_dropped_frames} dropped | {info.rebuffer_events} rebuffer events | "
-                     f"A/V offset {info.av_sync_ms:+.1f} ms")
-    if info.output_size:
-        parts.append(f"Received {info.source_size} -> Processing {info.input_size} -> Output {info.output_size} | {info.encoder}")
-    if info.source_quality_note:
-        parts.append(info.source_quality_note)
-    parts.append(f"DLSS effects: {info.effects_status}")
-    if info.applied_at_pts is not None:
-        parts.append(f"Latest applied change starts at video time {info.applied_at_pts / 90000:.2f}s; "
-                     "buffered video keeps its previous appearance until then.")
-    if info.effects_error:
-        parts.append(f"Effect update: {info.effects_error}")
-    if info.processing and info.source_fps:
-        parts.append(f"Source: {info.source_fps:.2f} fps. Motion guides: {info.guide_ms:.1f} ms | "
-                     f"DLSS: {info.dlss_ms:.1f} ms | Encode transport: {info.encode_ms:.1f} ms")
-    if info.report_path:
-        parts.append(f"Diagnostics: {info.report_path}")
-    return "\n".join(parts)
+    return _format_live_status(info), preview_html("live", "Live DLSS 5 enhanced output")
 
 
 @dataclass(slots=True)
@@ -134,6 +154,8 @@ class LiveTab:
     open_mpv: object
     start: object
     stop: object
+    refresh: object
+    preview: object
     status: object
     target_fps: object
     buffer: object
@@ -144,13 +166,15 @@ class LiveTab:
 
     @property
     def settings_inputs(self) -> list[object]:
-        # Shared DLSS values only (persisted globally + mirrored); the rest
-        # of the Live options are session-local.
         return [*self.neural, self.model_preset]
 
 
 def build_live_tab(settings: UISettings) -> LiveTab:
     height_labels = {"1440": "1440p (2K)", "2160": "2160p (4K)"}
+    gr.Markdown(
+        "The Live tab keeps the buffered HLS/MPV playback path, but now also shows "
+        "a browser viewport fed directly from the frames returned by signed DLSS feature 18."
+    )
     with gr.Row():
         with gr.Column(scale=3):
             source_mode = gr.Radio(
@@ -166,59 +190,71 @@ def build_live_tab(settings: UISettings) -> LiveTab:
                 label="Local video", file_count="single", file_types=["video"],
                 type="filepath", interactive=True,
             )
-            gr.Markdown("Live applies DLSS effect changes automatically, including shared edits from Neural Rendering's Image and Video modes. "
-                        "Edits are combined for 0.5 seconds; applying them takes a few seconds, "
-                        "plus playback buffering.")
+            gr.Markdown(
+                "Live applies DLSS effect changes automatically, including shared edits from Neural Rendering's "
+                "Image and Video modes. Edits are combined for 0.5 seconds; applying them takes a few seconds, "
+                "plus playback buffering."
+            )
             with gr.Accordion("DLSS 5 Neural Rendering Settings", open=True):
                 neural = build_neural_controls(settings)
-                neural[6].info += " In Live, changes apply on the next Start."
+                try:
+                    neural[6].info += " In Live, changes apply on the next Start."
+                except Exception:
+                    pass
             with gr.Accordion("DLSS 5 Settings", open=True):
                 model_preset = build_dlss_model_control(settings)
             with gr.Row():
                 source_quality = gr.Dropdown(
-                    choices=[("Auto (follow Max input height)" if height == "Auto" else
-                              height_labels.get(height, f"{height}p"), height)
-                             for height in LIVE_SOURCE_QUALITY_CHOICES],
-                    value="Auto", label="Source quality",
-                    info="YouTube/Twitch stream quality before resizing. Uses the best available format within "
-                         "the limit, with a fallback if unavailable. Changes apply on the next Start.",
+                    choices=[
+                        (
+                            "Auto (follow Max input height)"
+                            if height == "Auto"
+                            else height_labels.get(height, f"{height}p"),
+                            height,
+                        )
+                        for height in LIVE_SOURCE_QUALITY_CHOICES
+                    ],
+                    value="Auto",
+                    label="Source quality",
                 )
                 max_height = gr.Dropdown(
-                    choices=[(height_labels.get(height, height), height) for height in LIVE_MAX_HEIGHT_CHOICES],
+                    choices=[
+                        (height_labels.get(height, height), height)
+                        for height in LIVE_MAX_HEIGHT_CHOICES
+                    ],
                     value="720",
                     label="Max input height",
-                    info="Caps processing height before DLSS independently of Source quality. "
-                         "2K/4K use more GPU time and memory. Changes apply on the next Start.",
                 )
                 segment = gr.Dropdown(
                     choices=list(LIVE_SEGMENT_CHOICES),
                     value="2",
                     label="Segment length (s)",
-                    info="2 seconds is a good balance. The player waits for completed segments. Changes apply on the next Start.",
                 )
             with gr.Row():
                 target_fps = gr.Dropdown(
-                    choices=list(LIVE_FPS_CHOICES), value="Auto", label="Live frame rate",
-                    info="Auto measures processing cost and selects a steady rate up to 60 fps. "
-                         "Source keeps every frame; slower GPUs may need more buffering. Changes apply on the next Start.",
+                    choices=list(LIVE_FPS_CHOICES), value="Auto", label="Live frame rate"
                 )
                 buffer = gr.Slider(
-                    minimum=2, maximum=30, step=1, value=6, label="Playback buffer (seconds)",
-                    info="More buffering absorbs network and GPU stalls, with more playback delay. Changes apply on the next Start.",
+                    minimum=2,
+                    maximum=30,
+                    step=1,
+                    value=6,
+                    label="Playback buffer (seconds)",
                 )
             guide_quality = gr.Dropdown(
-                choices=list(LIVE_GUIDE_CHOICES), value="Fast", label="Motion guide quality",
-                info="Fast uses smaller motion estimation for Live. Quality uses the offline detail level. Changes apply on the next Start.",
+                choices=list(LIVE_GUIDE_CHOICES), value="Fast", label="Motion guide quality"
             )
             open_mpv = gr.Checkbox(
                 value=True,
                 label="Open in MPV",
-                info="Launch the portable player automatically on the live playlist. Changes apply on the next Start.",
             )
             with gr.Row():
                 start = gr.Button("Start Live", variant="primary")
                 stop = gr.Button("Stop", variant="stop")
-        with gr.Column(scale=3):
+                refresh = gr.Button("Refresh Status")
+        with gr.Column(scale=4):
+            gr.Markdown("### DLSS 5 enhanced live viewport")
+            preview = gr.HTML(value=preview_html("live", "Live DLSS 5 enhanced output"))
             status = gr.Textbox(
                 label="Live status",
                 value="Idle. Enter a source and press Start Live.",
@@ -226,19 +262,58 @@ def build_live_tab(settings: UISettings) -> LiveTab:
                 lines=10,
             )
     tab = LiveTab(
-        source, neural, model_preset, max_height, segment,
-        open_mpv, start, stop, status, target_fps, buffer, guide_quality, source_quality,
-        source_mode, local_video,
+        source,
+        neural,
+        model_preset,
+        max_height,
+        segment,
+        open_mpv,
+        start,
+        stop,
+        refresh,
+        preview,
+        status,
+        target_fps,
+        buffer,
+        guide_quality,
+        source_quality,
+        source_mode,
+        local_video,
     )
     start.click(
         start_live,
-        inputs=[source, *neural, model_preset, max_height, segment, open_mpv, target_fps, buffer,
-                guide_quality, source_quality, source_mode, local_video],
-        outputs=status,
+        inputs=[
+            source,
+            *neural,
+            model_preset,
+            max_height,
+            segment,
+            open_mpv,
+            target_fps,
+            buffer,
+            guide_quality,
+            source_quality,
+            source_mode,
+            local_video,
+        ],
+        outputs=[status, preview],
         concurrency_limit=1,
         show_progress="full",
     )
-    stop.click(stop_live, outputs=status, queue=False, show_progress="hidden")
-    timer = gr.Timer(0.5)
-    timer.tick(refresh_live_status, outputs=status, queue=False, show_progress="hidden")
+    stop.click(
+        stop_live,
+        outputs=[status, preview],
+        queue=False,
+        show_progress="hidden",
+    )
+    refresh.click(
+        refresh_live_status,
+        outputs=[status, preview],
+        queue=False,
+        show_progress="hidden",
+    )
+
+    # Do not use gr.Timer in this portable build. The user's installed Gradio
+    # emits "'float' object has no attribute 'is_set'" from Timer-driven events.
+    # The MJPEG image updates independently without a Gradio polling timer.
     return tab
