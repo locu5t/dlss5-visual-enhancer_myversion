@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 import gradio as gr
 
+from ..core.paths import LOGS
 from ..settings.models import UISettings, parse_automatic_mask
 from ..neural_rendering.video.ui import build_dlss_model_control, build_neural_controls
 from .models import (
@@ -21,6 +23,18 @@ from .pipeline import (
     start_realtime_session,
     stop_realtime_session,
 )
+
+
+def _log_realtime_error(stage: str, exc: BaseException) -> str:
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        path = LOGS / "optional_features.log"
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(f"\n[Realtime / {stage}] {type(exc).__name__}: {exc}\n")
+            stream.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        return str(path)
+    except Exception:
+        return str(LOGS / "optional_features.log")
 
 
 def start_realtime(
@@ -142,7 +156,7 @@ class RealtimeTab:
     status: object
 
 
-def build_realtime_tab(settings: UISettings) -> RealtimeTab:
+def _build_realtime_tab_impl(settings: UISettings) -> RealtimeTab:
     height_labels = {"1440": "1440p (2K)", "2160": "2160p (4K)"}
     gr.Markdown(
         "### Direct low-latency DLSS playback\n"
@@ -258,11 +272,33 @@ def build_realtime_tab(settings: UISettings) -> RealtimeTab:
         show_progress="full",
     )
     stop.click(stop_realtime, outputs=status, queue=False, show_progress="hidden")
-    timer = gr.Timer(0.25)
-    timer.tick(
-        refresh_realtime_status,
-        outputs=status,
-        queue=False,
-        show_progress="hidden",
-    )
+
+    # Gradio Timer is optional across portable builds. When absent, the session
+    # can still start/stop; only automatic status refresh is disabled.
+    timer_cls = getattr(gr, "Timer", None)
+    if timer_cls is not None:
+        timer = timer_cls(0.25)
+        tick = getattr(timer, "tick", None)
+        if callable(tick):
+            tick(
+                refresh_realtime_status,
+                outputs=status,
+                queue=False,
+                show_progress="hidden",
+            )
     return tab
+
+
+def build_realtime_tab(settings: UISettings) -> RealtimeTab | None:
+    """Do not let an optional realtime-UI mismatch prevent the web app from launching."""
+    try:
+        return _build_realtime_tab_impl(settings)
+    except Exception as exc:
+        log_path = _log_realtime_error("build", exc)
+        gr.Markdown(
+            "### Realtime DLSS unavailable\n"
+            f"The main DLSS application is still usable. The optional Realtime tab could not "
+            f"initialize with this portable UI build: `{type(exc).__name__}: {exc}`\n\n"
+            f"Diagnostic: `{log_path}`"
+        )
+        return None
