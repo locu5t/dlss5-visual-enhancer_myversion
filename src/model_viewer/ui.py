@@ -7,22 +7,20 @@ from pathlib import Path
 import gradio as gr
 
 from ..core.paths import LOGS
+from ..live.browser_preview import preview_html
 from ..settings.models import UISettings, parse_automatic_mask
 from ..neural_rendering.video.ui import build_dlss_model_control, build_neural_controls
 from .converter import UPLOAD_EXTENSIONS, prepare_for_viewer, viewer_capabilities
-from .dlss_overlay import (
-    OVERLAY_RESOLUTIONS,
-    OVERLAY_VIEWS,
-    blend_overlay,
-    render_dlss_overlay,
+from .live_dlss import (
+    MODEL_LIVE_RESOLUTIONS,
+    ModelLiveOptions,
+    is_model_live_running,
+    model_live_status,
+    start_model_live,
+    stop_model_live,
 )
 
-
-DISPLAY_MODES = {
-    "Solid": "solid",
-    "Wireframe": "wireframe",
-    "Point cloud": "point_cloud",
-}
+DISPLAY_MODES = {"Solid": "solid", "Wireframe": "wireframe", "Point cloud": "point_cloud"}
 
 
 def _log_viewer_error(stage: str, exc: BaseException) -> str:
@@ -38,330 +36,121 @@ def _log_viewer_error(stage: str, exc: BaseException) -> str:
 
 
 def _capability_text() -> str:
-    caps = viewer_capabilities()
-    native = ", ".join(caps["native"])
-    converter = []
-    if caps["trimesh"]:
-        converter.append("trimesh")
-    if caps["blender"]:
-        converter.append(f"Blender: {caps['blender']}")
+    caps = viewer_capabilities(); native = ", ".join(caps["native"]); converter=[]
+    if caps["trimesh"]: converter.append("trimesh")
+    if caps["blender"]: converter.append(f"Blender: {caps['blender']}")
     extra = ", ".join(converter) if converter else "no optional converter detected"
-    return (
-        f"Native viewer formats: {native}. Additional accepted formats are normalized "
-        f"to GLB when a local converter can read them ({extra})."
-    )
+    return f"Native viewer formats: {native}. Additional accepted formats are normalized to GLB when a local converter can read them ({extra})."
 
 
 def _viewer_update(path: str | None, display_mode: str):
-    if not path:
-        return None
-    mode = DISPLAY_MODES.get(display_mode, "solid")
-    update = getattr(gr, "update", None)
+    if not path: return None
+    mode=DISPLAY_MODES.get(display_mode,"solid"); update=getattr(gr,"update",None)
     if callable(update):
-        try:
-            return update(value=path, display_mode=mode)
+        try:return update(value=path,display_mode=mode)
         except TypeError:
-            try:
-                return update(value=path)
-            except TypeError:
-                pass
+            try:return update(value=path)
+            except TypeError:pass
     return path
 
 
 def load_model(files, display_mode: str, pack_dependencies: bool):
-    if not files:
-        raise gr.Error("Choose at least one 3D model file.")
-    try:
-        path, status = prepare_for_viewer(files, prefer_glb=bool(pack_dependencies))
-    except Exception as exc:
-        raise gr.Error(str(exc)) from exc
-    return _viewer_update(path, display_mode), path, status
+    if not files: raise gr.Error("Choose at least one 3D model file.")
+    try:path,status=prepare_for_viewer(files,prefer_glb=bool(pack_dependencies))
+    except Exception as exc: raise gr.Error(str(exc)) from exc
+    status += "\nReady for DLSS 5 Live 3D. The scene stays resident and interactive camera frames are processed continuously; no one-shot overlay images are created."
+    return _viewer_update(path,display_mode),path,status
 
 
-def change_display_mode(path: str | None, display_mode: str):
-    return _viewer_update(path, display_mode)
-
-
+def change_display_mode(path: str | None, display_mode: str): return _viewer_update(path,display_mode)
 def sync_native_upload(path):
-    if not path:
-        return None, _capability_text()
-    value = str(path)
-    return value, f"Loaded {Path(value).name} directly in the interactive 3D viewport."
+    if not path:return None,_capability_text()
+    value=str(path);return value,f"Loaded {Path(value).name}. Press Start DLSS 5 Live 3D for the enhanced viewer."
 
 
-def render_overlay_ui(
-    model_path: str | None,
-    nr_preset: str,
-    nr_style: str,
-    nr_intensity: float,
-    local_tone_strength: float,
-    local_structure_strength: float,
-    skin_structure_strength: float,
-    upscaling_factor: float,
-    automatic_mask: str,
-    dlss_model_preset: str,
-    view: str,
-    resolution: str,
-    blend: float,
-):
-    if not model_path:
-        raise gr.Error("Load a 3D model before rendering the DLSS 5 overlay.")
+def _format_live3d_status(info) -> str:
+    lines=[info.status]
+    if info.input_size: lines.append(f"Persistent 3D renderer {info.input_size} -> DLSS output {info.output_size} | {info.effective_fps:.2f} effective fps")
+    if info.requested_gpu: lines.append(f"Requested AI GPU: {info.requested_gpu}")
+    if info.frames: lines.append(f"Blender render {info.render_ms:.1f} ms | motion guides {info.guide_ms:.1f} ms | signed DLSS roundtrip {info.dlss_ms:.1f} ms | {info.frames} enhanced frames")
+    if info.feature_18_confirmed: lines.append("Signed NVIDIA feature 18 confirmed for the live 3D stream.")
+    if info.report_path: lines.append(f"Diagnostics: {info.report_path}")
+    return "\n".join(lines)
+
+
+def start_live3d_ui(model_path,nr_preset,nr_style,nr_intensity,local_tone_strength,local_structure_strength,skin_structure_strength,upscaling_factor,automatic_mask,dlss_model_preset,resolution):
+    if not model_path or not Path(model_path).is_file(): raise gr.Error("Load a 3D model before starting DLSS 5 Live 3D.")
+    if is_model_live_running(): raise gr.Error("A DLSS 5 Live 3D session is already running.")
     try:
-        raw, enhanced, composite, status = render_dlss_overlay(
-            model_path,
-            nr_preset,
-            nr_style,
-            nr_intensity,
-            local_tone_strength,
-            local_structure_strength,
-            skin_structure_strength,
-            upscaling_factor,
-            parse_automatic_mask(automatic_mask),
-            dlss_model_preset,
-            view,
-            resolution,
-            float(blend),
-        )
+        options=ModelLiveOptions(model_path=str(model_path),resolution=resolution if resolution in MODEL_LIVE_RESOLUTIONS else "720p",nr_preset=nr_preset,nr_style=nr_style,nr_intensity=float(nr_intensity),local_tone_strength=float(local_tone_strength),local_structure_strength=float(local_structure_strength),skin_structure_strength=float(skin_structure_strength),upscaling_factor=float(upscaling_factor),automatic_mask=parse_automatic_mask(automatic_mask),dlss_model_preset=dlss_model_preset); info=start_model_live(options)
     except Exception as exc:
-        _log_viewer_error("DLSS overlay", exc)
-        raise gr.Error(str(exc)) from exc
-    return raw, enhanced, composite, raw, enhanced, status
+        _log_viewer_error("start live 3D",exc); raise gr.Error(str(exc)) from exc
+    return _format_live3d_status(info),preview_html("model3d","DLSS 5 Live 3D Viewer")
 
 
-def reblend_overlay(raw_path: str | None, enhanced_path: str | None, blend: float):
-    if not raw_path or not enhanced_path:
-        return None
-    try:
-        return blend_overlay(raw_path, enhanced_path, float(blend))
-    except Exception as exc:
-        raise gr.Error(str(exc)) from exc
+def stop_live3d_ui():
+    try: info=stop_model_live()
+    except Exception as exc: _log_viewer_error("stop live 3D",exc); raise gr.Error(str(exc)) from exc
+    return _format_live3d_status(info),preview_html("model3d","DLSS 5 Live 3D Viewer")
 
-
+def refresh_live3d_ui():
+    info=model_live_status(); return _format_live3d_status(info),preview_html("model3d","DLSS 5 Live 3D Viewer")
 def clear_model():
-    return None, None, "Cleared model."
-
-
-def clear_overlay():
-    return None, None, None, None, None
+    if is_model_live_running(): raise gr.Error("Stop DLSS 5 Live 3D before clearing the model.")
+    return None,None,"Cleared model.",preview_html("model3d","DLSS 5 Live 3D Viewer")
 
 
 @dataclass(slots=True)
 class ModelViewerTab:
-    files: object
-    display_mode: object
-    pack_dependencies: object
-    load: object
-    clear: object
-    viewer: object
-    current_path: object
-    status: object
-    neural: list[object]
-    model_preset: object
-    overlay_view: object
-    overlay_resolution: object
-    overlay_blend: object
-    render_overlay: object
-    clear_overlay: object
-    raw_render: object
-    enhanced_render: object
-    overlay_render: object
-    raw_state: object
-    enhanced_state: object
+    files: object; display_mode: object; pack_dependencies: object; load: object; clear: object; source_viewer: object; current_path: object; status: object; neural: list[object]; model_preset: object; live_resolution: object; start_live: object; stop_live: object; refresh_live: object; live_viewer: object
 
 
 def _create_file_component():
-    attempts = (
-        dict(label="3D model + companion files", file_count="multiple", type="filepath", interactive=True),
-        dict(label="3D model + companion files", file_count="multiple", type="filepath"),
-        dict(label="3D model + companion files", file_count="multiple"),
-        dict(label="3D model + companion files"),
-    )
-    errors: list[str] = []
+    attempts=(dict(label="3D model + companion files",file_count="multiple",type="filepath",interactive=True),dict(label="3D model + companion files",file_count="multiple",type="filepath"),dict(label="3D model + companion files",file_count="multiple"),dict(label="3D model + companion files")); errors=[]
     for kwargs in attempts:
-        try:
-            return gr.File(**kwargs)
-        except TypeError as exc:
-            errors.append(str(exc))
-    raise RuntimeError("Could not construct the 3D uploader with this Gradio build: " + " | ".join(errors))
+        try:return gr.File(**kwargs)
+        except TypeError as exc:errors.append(str(exc))
+    raise RuntimeError("Could not construct the 3D uploader with this Gradio build: "+" | ".join(errors))
 
 
 def _create_model3d_component():
-    component = getattr(gr, "Model3D", None)
-    if component is None:
-        raise RuntimeError(
-            f"This portable Gradio build ({getattr(gr, '__version__', 'unknown')}) has no Model3D component."
-        )
-    attempts = (
-        dict(label="3D viewport", display_mode="solid", clear_color=(0.025, 0.025, 0.035, 1.0), height=720, interactive=True),
-        dict(label="3D viewport", display_mode="solid", height=720, interactive=True),
-        dict(label="3D viewport", height=720),
-        dict(label="3D viewport"),
-        {},
-    )
-    errors: list[str] = []
+    component=getattr(gr,"Model3D",None)
+    if component is None: raise RuntimeError(f"This portable Gradio build ({getattr(gr,'__version__','unknown')}) has no Model3D component.")
+    attempts=(dict(label="Source geometry viewport (unprocessed reference)",display_mode="solid",clear_color=(0.025,0.025,0.035,1.0),height=520,interactive=True),dict(label="Source geometry viewport",display_mode="solid",height=520,interactive=True),dict(label="Source geometry viewport",height=520),dict(label="Source geometry viewport"),{});errors=[]
     for kwargs in attempts:
-        try:
-            return component(**kwargs)
-        except TypeError as exc:
-            errors.append(str(exc))
-    raise RuntimeError("Could not construct Model3D with this Gradio build: " + " | ".join(errors))
-
-
-def _create_image_component(label: str, height: int = 420):
-    attempts = (
-        dict(label=label, type="filepath", interactive=False, height=height),
-        dict(label=label, type="filepath", interactive=False),
-        dict(label=label, interactive=False),
-        dict(label=label),
-    )
-    errors: list[str] = []
-    for kwargs in attempts:
-        try:
-            return gr.Image(**kwargs)
-        except TypeError as exc:
-            errors.append(str(exc))
-    raise RuntimeError("Could not construct overlay image component: " + " | ".join(errors))
+        try:return component(**kwargs)
+        except TypeError as exc:errors.append(str(exc))
+    raise RuntimeError("Could not construct Model3D with this Gradio build: "+" | ".join(errors))
 
 
 def _build_model_viewer_tab_impl(settings: UISettings) -> ModelViewerTab:
-    gr.Markdown(
-        "### 3D Model Viewer + DLSS 5 Overlay\n"
-        "The interactive viewport is the model-control surface for orbit/pan/zoom. "
-        "The **DLSS 5 Overlay** section performs a real camera render of the same model "
-        "and sends that frame through signed Neural Rendering feature 18 using the controls on the left. "
-        "This is real DLSS processing, not a CSS filter. The current native worker does not accept the "
-        "browser WebGL texture directly, so the feature-18 overlay is a rendered camera frame rather than "
-        "a fake claim of zero-copy game-engine integration."
-    )
+    gr.Markdown("### 3D Model Viewer — DLSS 5 Live\nThe primary output is now an **interactive live DLSS 5 viewport**, not the old source/DLSS/composite still-image overlay. A persistent Blender scene remains loaded. Dragging the enhanced viewport changes its camera, Blender returns raw in-memory RGBA, temporal motion guides are generated, and signed feature 18 processes each requested view before it is streamed back. The browser Model3D component is retained only as a collapsed unprocessed geometry reference.")
     with gr.Row():
         with gr.Column(scale=2):
-            files = _create_file_component()
-            gr.Markdown("For OBJ/GLTF bundles, select MTL/BIN/textures with the primary file.")
-            display_mode = gr.Radio(choices=list(DISPLAY_MODES), value="Solid", label="Display mode")
-            pack_dependencies = gr.Checkbox(value=True, label="Pack OBJ/GLTF dependencies to GLB when possible")
-            with gr.Row():
-                load = gr.Button("Load Model", variant="primary")
-                clear = gr.Button("Clear Model")
-
-            with gr.Accordion("DLSS 5 Neural Rendering Settings", open=True):
-                neural = build_neural_controls(settings)
-            with gr.Accordion("DLSS 5 Settings", open=True):
-                model_preset = build_dlss_model_control(settings)
-
-            gr.Markdown("#### DLSS 5 Overlay Render")
-            overlay_view = gr.Dropdown(choices=list(OVERLAY_VIEWS), value="Three-quarter", label="Camera view")
-            overlay_resolution = gr.Dropdown(
-                choices=list(OVERLAY_RESOLUTIONS), value="720p", label="Base camera render"
-            )
-            overlay_blend = gr.Slider(
-                minimum=0.0,
-                maximum=1.0,
-                step=0.05,
-                value=1.0,
-                label="DLSS overlay blend",
-            )
-            with gr.Row():
-                render_overlay_button = gr.Button("Render DLSS 5 Overlay", variant="primary")
-                clear_overlay_button = gr.Button("Clear Overlay")
-            status = gr.Textbox(label="Viewer / DLSS status", value=_capability_text(), interactive=False, lines=8)
-            gr.Markdown(
-                "**Model formats:** " + ", ".join(f"`{ext}`" for ext in UPLOAD_EXTENSIONS)
-                + "\n\nThe overlay camera renderer supports mesh models that Blender can import after the viewer's conversion stage. "
-                "SPLAT remains interactive-only unless a local splat-to-mesh/import plug-in is installed."
-            )
-
+            files=_create_file_component();gr.Markdown("For OBJ/GLTF bundles, select MTL/BIN/textures with the primary file. Non-native DCC files are converted to GLB first when Blender/trimesh supports them.")
+            display_mode=gr.Radio(choices=list(DISPLAY_MODES),value="Solid",label="Source reference display mode");pack_dependencies=gr.Checkbox(value=True,label="Pack OBJ/GLTF dependencies to GLB when possible")
+            with gr.Row():load=gr.Button("Load Model",variant="primary");clear=gr.Button("Clear Model")
+            with gr.Accordion("DLSS 5 Neural Rendering Settings",open=True):neural=build_neural_controls(settings)
+            with gr.Accordion("DLSS 5 Settings",open=False):model_preset=build_dlss_model_control(settings)
+            live_resolution=gr.Dropdown(choices=list(MODEL_LIVE_RESOLUTIONS),value="720p",label="Live 3D base render")
+            with gr.Row():start_live=gr.Button("Start DLSS 5 Live 3D",variant="primary");stop_live=gr.Button("Stop",variant="stop");refresh_live=gr.Button("Refresh Status")
+            status=gr.Textbox(label="3D / DLSS status",value=_capability_text(),interactive=False,lines=10)
+            gr.Markdown("**Model formats:** "+", ".join(f"`{ext}`" for ext in UPLOAD_EXTENSIONS)+"\n\nThe live renderer needs a Blender-readable mesh. SPLAT remains source-viewer only unless a Gaussian-splat Blender importer is installed.")
         with gr.Column(scale=4):
-            viewer = _create_model3d_component()
-            current_path = gr.State(None)
-            gr.Markdown("### DLSS 5 overlay effect")
-            overlay_render_component = _create_image_component("DLSS 5 overlay", 500)
-            with gr.Row():
-                raw_render = _create_image_component("Source camera render", 300)
-                enhanced_render = _create_image_component("Signed DLSS 5 render", 300)
-            raw_state = gr.State(None)
-            enhanced_state = gr.State(None)
-
-    load.click(
-        load_model,
-        inputs=[files, display_mode, pack_dependencies],
-        outputs=[viewer, current_path, status],
-        show_progress="full",
-        concurrency_limit=1,
-    )
-    upload = getattr(viewer, "upload", None)
-    if callable(upload):
-        upload(sync_native_upload, inputs=viewer, outputs=[current_path, status], queue=False, show_progress="hidden")
-    display_mode.change(change_display_mode, inputs=[current_path, display_mode], outputs=viewer, queue=False, show_progress="hidden")
-    clear.click(clear_model, outputs=[viewer, current_path, status], queue=False, show_progress="hidden")
-
-    render_overlay_button.click(
-        render_overlay_ui,
-        inputs=[
-            current_path,
-            *neural,
-            model_preset,
-            overlay_view,
-            overlay_resolution,
-            overlay_blend,
-        ],
-        outputs=[
-            raw_render,
-            enhanced_render,
-            overlay_render_component,
-            raw_state,
-            enhanced_state,
-            status,
-        ],
-        concurrency_limit=1,
-        show_progress="full",
-    )
-    overlay_blend.change(
-        reblend_overlay,
-        inputs=[raw_state, enhanced_state, overlay_blend],
-        outputs=overlay_render_component,
-        queue=False,
-        show_progress="hidden",
-    )
-    clear_overlay_button.click(
-        clear_overlay,
-        outputs=[raw_render, enhanced_render, overlay_render_component, raw_state, enhanced_state],
-        queue=False,
-        show_progress="hidden",
-    )
-
-    return ModelViewerTab(
-        files,
-        display_mode,
-        pack_dependencies,
-        load,
-        clear,
-        viewer,
-        current_path,
-        status,
-        neural,
-        model_preset,
-        overlay_view,
-        overlay_resolution,
-        overlay_blend,
-        render_overlay_button,
-        clear_overlay_button,
-        raw_render,
-        enhanced_render,
-        overlay_render_component,
-        raw_state,
-        enhanced_state,
-    )
+            gr.Markdown("### DLSS 5 Live 3D Viewer");live_viewer=gr.HTML(value=preview_html("model3d","DLSS 5 Live 3D Viewer"))
+            with gr.Accordion("Unprocessed source geometry reference",open=False):source_viewer=_create_model3d_component()
+            current_path=gr.State(None)
+    load.click(load_model,inputs=[files,display_mode,pack_dependencies],outputs=[source_viewer,current_path,status],show_progress="full",concurrency_limit=1)
+    upload=getattr(source_viewer,"upload",None)
+    if callable(upload):upload(sync_native_upload,inputs=source_viewer,outputs=[current_path,status],queue=False,show_progress="hidden")
+    display_mode.change(change_display_mode,inputs=[current_path,display_mode],outputs=source_viewer,queue=False,show_progress="hidden")
+    clear.click(clear_model,outputs=[source_viewer,current_path,status,live_viewer],queue=False,show_progress="hidden")
+    start_live.click(start_live3d_ui,inputs=[current_path,*neural,model_preset,live_resolution],outputs=[status,live_viewer],concurrency_limit=1,show_progress="full")
+    stop_live.click(stop_live3d_ui,outputs=[status,live_viewer],queue=False,show_progress="hidden");refresh_live.click(refresh_live3d_ui,outputs=[status,live_viewer],queue=False,show_progress="hidden")
+    return ModelViewerTab(files,display_mode,pack_dependencies,load,clear,source_viewer,current_path,status,neural,model_preset,live_resolution,start_live,stop_live,refresh_live,live_viewer)
 
 
 def build_model_viewer_tab(settings: UISettings = UISettings()) -> ModelViewerTab | None:
-    try:
-        return _build_model_viewer_tab_impl(settings)
+    try:return _build_model_viewer_tab_impl(settings)
     except Exception as exc:
-        log_path = _log_viewer_error("build", exc)
-        gr.Markdown(
-            "### 3D Viewer unavailable\n"
-            f"The main DLSS application is still usable. This portable Gradio build could not "
-            f"initialize the 3D viewer: `{type(exc).__name__}: {exc}`\n\n"
-            f"Diagnostic: `{log_path}`"
-        )
-        return None
+        log_path=_log_viewer_error("build",exc);gr.Markdown("### 3D Viewer unavailable\n"+f"The main DLSS application is still usable. This portable Gradio build could not initialize the 3D viewer: `{type(exc).__name__}: {exc}`\n\nDiagnostic: `{log_path}`");return None
