@@ -353,7 +353,7 @@ def _build_model_viewer_tab_impl(settings: UISettings) -> ModelViewerTab:
     )
 
 
-def build_model_viewer_tab(settings: UISettings) -> ModelViewerTab | None:
+def build_model_viewer_tab(settings: UISettings = UISettings()) -> ModelViewerTab | None:
     try:
         return _build_model_viewer_tab_impl(settings)
     except Exception as exc:
