@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import shutil
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,7 @@ from typing import Any
 import uvicorn
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..core.paths import JOBS, LOGS, OUTPUTS, ROOT
@@ -222,13 +224,41 @@ def live_stop() -> dict[str, Any]:
     return stop_live()
 
 
+def _save_upload_group(files: list[UploadFile], group: str) -> list[Path]:
+    """Save a multipart bundle into one directory.
+
+    OBJ/GLTF references are relative to the primary model. Keeping the primary,
+    MTL/BIN and textures together preserves those relative dependency paths for
+    the existing converter instead of scattering each upload across UUID dirs.
+    """
+    folder = JOBS / "typescript-ui" / group / uuid.uuid4().hex
+    folder.mkdir(parents=True, exist_ok=False)
+    result: list[Path] = []
+    used: set[str] = set()
+    for item in files:
+        name = Path(item.filename or "model.bin").name
+        if not name:
+            name = "model.bin"
+        base, suffix = Path(name).stem, Path(name).suffix
+        candidate = name
+        index = 2
+        while candidate.casefold() in used or (folder / candidate).exists():
+            candidate = f"{base}-{index}{suffix}"
+            index += 1
+        used.add(candidate.casefold())
+        destination = folder / candidate
+        with destination.open("wb") as stream:
+            shutil.copyfileobj(item.file, stream, length=1024 * 1024)
+        result.append(destination.resolve())
+    return result
+
+
 @app.post("/api/model/prepare")
 def model_prepare(files: list[UploadFile] = File(...)) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="Choose a 3D model file.")
     try:
-        stored = [save_uploaded_file(item.filename or "model.bin", item.file, group="models") for item in files]
-        return prepare_model(stored)
+        return prepare_model(_save_upload_group(files, "models"))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}") from exc
 
@@ -257,8 +287,8 @@ def model_stop() -> dict[str, Any]:
     return stop_model_live_bridge()
 
 
-@app.get("/{path:path}", response_class=HTMLResponse)
-def static_app(path: str) -> HTMLResponse | FileResponse:
+@app.get("/{path:path}", response_class=HTMLResponse, response_model=None)
+def static_app(path: str):
     index = DIST / "index.html"
     if not index.is_file():
         return HTMLResponse(
@@ -270,7 +300,7 @@ def static_app(path: str) -> HTMLResponse | FileResponse:
         )
     requested = (DIST / path).resolve() if path else index.resolve()
     dist_root = DIST.resolve()
-    if requested.is_file() and (requested == dist_root or dist_root in requested.parents):
+    if requested.is_file() and dist_root in requested.parents:
         return FileResponse(requested)
     return FileResponse(index)
 
