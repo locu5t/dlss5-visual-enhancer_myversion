@@ -72,7 +72,7 @@ export const App: React.FC = () => {
     return () => { mounted = false; };
   }, []);
 
-  const onChange = useCallback(<K extends keyof UISettings>(key: K, value: UISettings[K]) => {
+  const onChange = useCallback(<K extends keyof UISettings,>(key: K, value: UISettings[K]) => {
     setSettings((previous) => ({ ...previous, [key]: value }));
   }, []);
 
