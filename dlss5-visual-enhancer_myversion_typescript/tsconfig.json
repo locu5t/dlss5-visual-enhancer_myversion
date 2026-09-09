@@ -15,5 +15,14 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": [
+    "src/main.tsx",
+    "src/App.tsx",
+    "src/types.ts",
+    "src/vite-env.d.ts",
+    "src/api/**/*.ts",
+    "src/components/Navbar.tsx",
+    "src/components/AboutTab.tsx",
+    "src/components/runtime/**/*.tsx"
+  ]
 }

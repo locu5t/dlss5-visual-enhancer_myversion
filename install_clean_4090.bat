@@ -2,14 +2,17 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 chcp 65001 >nul
-title DLSS 5 Visual Enhancer - Clean RTX 4090 Installer
+title DLSS 5 Visual Enhancer - Clean RTX 4090 + TypeScript Installer
 cls
 
-echo DLSS 5 Visual Enhancer - Clean RTX 4090 Installer
+echo DLSS 5 Visual Enhancer - Clean RTX 4090 + TypeScript Installer
 echo.
-echo This downloads the verified v7.0 portable runtime, overlays this repository,
-echo verifies required files, applies the RTX 4090 best profile, and preserves an
-echo existing install as a timestamped backup instead of deleting it.
+echo This downloads and SHA-256 verifies the v7.0 native portable runtime,
+echo overlays this repository, applies the RTX 4090 best profile, installs and
+echo builds the TypeScript/React primary UI, then verifies the final layout.
+echo.
+echo The previous portable install is not moved until the complete staged build
+echo succeeds. Existing installs are preserved as timestamped backups.
 echo.
 
 where powershell.exe >nul 2>nul
@@ -26,15 +29,12 @@ if not exist "%INSTALLER%" (
     exit /b 1
 )
 
-rem IMPORTANT: use %%~dp0. instead of %%~dp0 when forwarding the directory to
-rem PowerShell. %%~dp0 ends in a backslash; a trailing backslash immediately
-rem before the closing quote can be preserved as an embedded quote by command-
-rem line parsing on some Windows/PowerShell paths, producing "Illegal characters
-rem in path". The trailing dot resolves to the same directory without that edge.
+rem Use %%~dp0. rather than a quoted path ending directly in backslash; this
+rem avoids the Windows PowerShell trailing-backslash/quote parsing edge case.
 set "SOURCE_ROOT=%~dp0."
 
-rem Double-click = clean install to a sibling DLSS5_4090_PORTABLE folder and launch.
-rem Advanced usage examples:
+rem Double-click = install to sibling DLSS5_4090_PORTABLE and launch TypeScript UI.
+rem Advanced examples:
 rem   install_clean_4090.bat -InstallDir "E:\Apps\DLSS5_4090"
 rem   install_clean_4090.bat -InstallDir "E:\Apps\DLSS5_4090" -Launch
 rem   install_clean_4090.bat -KeepDownload
