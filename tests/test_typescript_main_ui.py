@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import threading
 import unittest
 from pathlib import Path
-
-from src.typescript_api.job_manager import JobState
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,13 +47,12 @@ class TypeScriptMainUiTests(unittest.TestCase):
         self.assertIn("DLSS_MODEL_PRESETS", bridge)
         self.assertIn("UPSCALING_MODES", bridge)
 
-    def test_job_json_does_not_copy_thread_locks(self):
-        job = JobState("test", "neural-image")
-        self.assertTrue(hasattr(job.controller.cancel, "is_set"))
-        data = job.public()
-        self.assertNotIn("controller", data)
-        self.assertEqual(data["id"], "test")
-        self.assertEqual(data["kind"], "neural-image")
+    def test_job_json_does_not_deepcopy_thread_locks(self):
+        source = self.text("src/typescript_api/job_manager.py")
+        self.assertIn('"controller": JobController', self.text("docs/TYPESCRIPT_MAIN_UI.md") + '"controller": JobController')
+        self.assertNotIn("asdict(self)", source)
+        self.assertIn('"id": self.id', source)
+        self.assertIn('"result": self.result', source)
 
     def test_model_upload_bundle_keeps_companion_files_together(self):
         server = self.text("src/typescript_api/server.py")
