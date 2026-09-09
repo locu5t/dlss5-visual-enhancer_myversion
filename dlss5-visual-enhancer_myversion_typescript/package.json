@@ -1,13 +1,13 @@
 {
-  "name": "dlss5-visual-enhancer",
+  "name": "dlss5-visual-enhancer-typescript-ui",
   "private": true,
-  "version": "1.0.0",
+  "version": "7.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 3000",
-    "build": "tsc -b && vite build",
-    "lint": "tsc --noEmit",
-    "preview": "vite preview --host 0.0.0.0 --port 3000"
+    "dev": "vite --host 127.0.0.1 --port 3000 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 3000 --strictPort"
   },
   "dependencies": {
     "lucide-react": "^1.43.0",
