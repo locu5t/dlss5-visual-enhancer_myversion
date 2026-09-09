@@ -49,7 +49,7 @@ class TypeScriptMainUiTests(unittest.TestCase):
 
     def test_job_json_does_not_deepcopy_thread_locks(self):
         source = self.text("src/typescript_api/job_manager.py")
-        self.assertIn('"controller": JobController', self.text("docs/TYPESCRIPT_MAIN_UI.md") + '"controller": JobController')
+        self.assertIn("controller: JobController", source)
         self.assertNotIn("asdict(self)", source)
         self.assertIn('"id": self.id', source)
         self.assertIn('"result": self.result', source)
