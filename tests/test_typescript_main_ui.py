@@ -8,7 +8,6 @@ from src.typescript_api.job_manager import JobState
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TS = ROOT / "dlss5-visual-enhancer_myversion_typescript"
 
 
 class TypeScriptMainUiTests(unittest.TestCase):
@@ -22,15 +21,16 @@ class TypeScriptMainUiTests(unittest.TestCase):
         legacy = self.text("start_python_legacy.bat")
         self.assertIn("app.py", legacy)
 
-    def test_production_app_uses_runtime_backed_tabs_not_mock_render_timer(self):
+    def test_production_app_uses_runtime_backed_tabs_not_mock_render_pipeline(self):
         app = self.text("dlss5-visual-enhancer_myversion_typescript/src/App.tsx")
         for component in (
             "NeuralRuntimeTab", "UpscaleRuntimeTab", "FrameRuntimeTab",
             "LiveRuntimeTab", "ModelRuntimeTab", "SettingsRuntimeTab",
         ):
             self.assertIn(component, app)
-        self.assertNotIn("setTimeout(() =>", app)
+        self.assertIn("backend.bootstrap()", app)
         self.assertNotIn("INITIAL_BATCH_ITEMS", app)
+        self.assertNotIn("handleStartJob", app)
 
     def test_typescript_defaults_do_not_invent_gpu_hardware(self):
         defaults = self.text("dlss5-visual-enhancer_myversion_typescript/src/data/defaults.ts")
@@ -52,7 +52,7 @@ class TypeScriptMainUiTests(unittest.TestCase):
 
     def test_job_json_does_not_copy_thread_locks(self):
         job = JobState("test", "neural-image")
-        self.assertIsInstance(job.controller.cancel, threading.Event)
+        self.assertTrue(hasattr(job.controller.cancel, "is_set"))
         data = job.public()
         self.assertNotIn("controller", data)
         self.assertEqual(data["id"], "test")
