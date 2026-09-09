@@ -4,7 +4,7 @@ import threading
 import time
 import traceback
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..core.jobs import JobController
@@ -25,9 +25,22 @@ class JobState:
     controller: JobController = field(default_factory=JobController, repr=False)
 
     def public(self) -> dict[str, Any]:
-        data = asdict(self)
-        data.pop("controller", None)
-        return data
+        # Do not use dataclasses.asdict(self): JobController owns threading.Event
+        # and Lock instances, and asdict() deep-copies them before a field can be
+        # removed. Build the API document explicitly so synchronization objects
+        # can never enter JSON serialization.
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "progress": self.progress,
+            "message": self.message,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "result": self.result,
+            "error": self.error,
+            "traceback": self.traceback,
+        }
 
 
 _LOCK = threading.Lock()
