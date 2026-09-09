@@ -24,6 +24,13 @@ class UnifiedLiveArchitectureTests(unittest.TestCase):
         self.assertIn("start_live_session", source)
         self.assertEqual(source.count("build_neural_controls(settings)"), 1)
 
+    def test_live_start_bypasses_portable_gradio_queue(self):
+        source = self.text("src/live/ui.py")
+        self.assertIn("start.click(", source)
+        self.assertIn("queue=False", source)
+        self.assertNotIn("concurrency_limit=1", source)
+        self.assertIn("live_ui_error.log", source)
+
     def test_live_player_uses_runtime_aspect_and_transport_bar(self):
         source = self.text("src/live/browser_preview.py")
         self.assertIn("meta.width", source)
@@ -41,6 +48,15 @@ class UnifiedLiveArchitectureTests(unittest.TestCase):
         self.assertIn("pixels.foreach_get", live)
         self.assertIn("DLSSFrameSession", live)
         self.assertNotIn("write_still=True", live)
+
+    def test_3d_upload_becomes_active_model_without_second_click(self):
+        ui = self.text("src/model_viewer/ui.py")
+        self.assertIn("_extract_file_paths", ui)
+        self.assertIn("_prepare_uploaded_model", ui)
+        self.assertIn('change = getattr(files, "change", None)', ui)
+        self.assertIn("uploaded_files", ui)
+        self.assertIn("outputs=[status, live_viewer, current_path]", ui)
+        self.assertIn("queue=False", ui)
 
 
 if __name__ == "__main__":
