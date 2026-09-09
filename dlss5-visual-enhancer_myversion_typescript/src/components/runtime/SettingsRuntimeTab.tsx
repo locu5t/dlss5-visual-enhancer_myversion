@@ -31,10 +31,10 @@ export const SettingsRuntimeTab: React.FC<Props> = ({ settings, choices, gpus, r
   const exportPreset = async () => {
     setBusy(true); setMessage('');
     try {
-      const document = await backend.exportPreset(presetName, settings);
-      const blob = new Blob([JSON.stringify(document, null, 2) + '\n'], { type: 'application/json' });
+      const presetDoc = await backend.exportPreset(presetName, settings);
+      const blob = new Blob([JSON.stringify(presetDoc, null, 2) + '\n'], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
+      const link = window.document.createElement('a');
       const safe = presetName.trim().replace(/[^a-z0-9_-]+/gi, '_') || 'DLSS5_Preset';
       link.href = url; link.download = `${safe}.json`; link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
