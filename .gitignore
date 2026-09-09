@@ -6,3 +6,8 @@ logs/
 outputs/
 jobs/
 live/
+cache/
+.install-cache/
+.typescript-install/
+dlss5-visual-enhancer_myversion_typescript/node_modules/
+dlss5-visual-enhancer_myversion_typescript/dist/
