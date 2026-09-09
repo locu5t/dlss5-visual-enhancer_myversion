@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
 import threading
 import unittest
+from pathlib import Path
 
-from src.realtime.thread_compat import install_thread_started_guard
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "dlss5_realtime_thread_compat_test_module",
+    ROOT / "src" / "realtime" / "thread_compat.py",
+)
+assert SPEC is not None and SPEC.loader is not None
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+install_thread_started_guard = MODULE.install_thread_started_guard
 
 
 class _CollisionThread(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True)
-        # Reproduce the bug that existed in RealtimeSession: this would replace
-        # threading.Thread's internal Event without the compatibility guard.
+        # Reproduce the exact RealtimeSession bug. Without the guard this
+        # replaces Thread._started (a threading.Event) with a float.
         self._started = 1.25
 
     def run(self) -> None:
