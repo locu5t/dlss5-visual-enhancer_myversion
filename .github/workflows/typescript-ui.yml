@@ -5,12 +5,14 @@ on:
     paths:
       - 'dlss5-visual-enhancer_myversion_typescript/**'
       - 'src/typescript_api/**'
+      - 'src/realtime/thread_compat.py'
       - 'tools/install_typescript_ui.ps1'
       - 'tools/install_clean_4090.ps1'
       - 'run_typescript_ui.bat'
       - 'start.bat'
       - 'start_4090.bat'
       - 'tests/test_typescript_main_ui.py'
+      - 'tests/test_realtime_thread_compat.py'
       - '.github/workflows/typescript-ui.yml'
   workflow_dispatch:
 
@@ -39,5 +41,7 @@ jobs:
           python-version: '3.13'
       - name: Compile TypeScript API backend
         run: python -m compileall -q src/typescript_api
-      - name: Run architecture regressions
-        run: python -m unittest tests.test_typescript_main_ui tests.test_realtime_thread_compat -v
+      - name: Run TypeScript architecture regressions
+        run: python -m unittest discover -s tests -p 'test_typescript_main_ui.py' -v
+      - name: Run realtime Thread compatibility regression
+        run: python -m unittest discover -s tests -p 'test_realtime_thread_compat.py' -v
