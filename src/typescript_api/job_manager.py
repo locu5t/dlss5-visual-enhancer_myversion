@@ -35,12 +35,6 @@ _JOBS: dict[str, JobState] = {}
 _ACTIVE_ID: str | None = None
 
 
-def _set_active(job_id: str | None) -> None:
-    global _ACTIVE_ID
-    with _LOCK:
-        _ACTIVE_ID = job_id
-
-
 def active_job_id() -> str | None:
     with _LOCK:
         return _ACTIVE_ID
@@ -61,6 +55,7 @@ def update(job: JobState, *, progress: float | None = None, message: str | None 
 
 
 def start_job(kind: str, runner: Callable[[JobState], dict[str, Any]]) -> JobState:
+    global _ACTIVE_ID
     with _LOCK:
         if _ACTIVE_ID is not None:
             active = _JOBS.get(_ACTIVE_ID)
@@ -68,10 +63,10 @@ def start_job(kind: str, runner: Callable[[JobState], dict[str, Any]]) -> JobSta
                 raise RuntimeError(f"Another GPU job is already running ({active.kind}, {active.id}).")
         job = JobState(id=uuid.uuid4().hex, kind=kind)
         _JOBS[job.id] = job
-        global _ACTIVE_ID
         _ACTIVE_ID = job.id
 
     def worker() -> None:
+        global _ACTIVE_ID
         try:
             job.status = "running"
             update(job, progress=0.0, message="Starting")
@@ -95,7 +90,6 @@ def start_job(kind: str, runner: Callable[[JobState], dict[str, Any]]) -> JobSta
                 update(job, message=job.error)
         finally:
             with _LOCK:
-                global _ACTIVE_ID
                 if _ACTIVE_ID == job.id:
                     _ACTIVE_ID = None
 
@@ -121,5 +115,6 @@ def prune_jobs(max_age_seconds: float = 86400.0, keep: int = 100) -> None:
             for job_id, job in _JOBS.items()
             if job.status not in {"queued", "running"} and job.updated_at < cutoff
         ]
-        for _updated, job_id in sorted(finished)[:-keep] if len(finished) > keep else []:
-            _JOBS.pop(job_id, None)
+        if len(finished) > keep:
+            for _updated, job_id in sorted(finished)[: len(finished) - keep]:
+                _JOBS.pop(job_id, None)
