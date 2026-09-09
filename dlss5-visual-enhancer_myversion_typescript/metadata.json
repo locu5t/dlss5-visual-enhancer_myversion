@@ -1,0 +1,6 @@
+{
+  "name": "DLSS 5 Visual Enhancer",
+  "description": "DLSS 5 Neural Rendering pipeline, RTX Super Resolution, DLSS Frame Generation, Realtime Live Stream Enhancer, and 3D Model Viewer.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
