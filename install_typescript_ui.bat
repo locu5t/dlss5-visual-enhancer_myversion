@@ -11,7 +11,7 @@ echo ================================================================
 echo.
 echo This installs/builds the React TypeScript interface and keeps all npm
 echo cache/tooling under this application folder. It does not replace the
- echo NVIDIA native runtime or download model weights.
+echo NVIDIA native runtime or download model weights.
 echo.
 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\install_typescript_ui.ps1" -SourceRoot "%~dp0." -Launch
