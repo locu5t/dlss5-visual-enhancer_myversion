@@ -30,7 +30,6 @@ from src.core.runtime import prepare_runtime
 from src.core.terminal import init_console
 from src.frame_interpolation.ui import build_frame_interpolation_tab
 from src.live.ui import build_live_tab
-from src.realtime.ui import build_realtime_tab
 from src.model_viewer.ui import build_model_viewer_tab
 from src.neural_rendering.image.decoder import initialize_image_runtime
 from src.neural_rendering.ui import build_neural_rendering_tab
@@ -210,16 +209,9 @@ def build_app() -> gr.Blocks:
     settings, _gpu_warning, ai_gpu_choices, video_gpu_choices = initialize_settings(prepared)
     with gr.Blocks(
         title="DLSS 5 Visual Enhancer",
-        # Official Gradio cache cleanup (see guides/resource-cleanup): every
-        # CACHE_SWEEP_INTERVAL_SECONDS, delete tracked temp files older than
-        # CACHE_MAX_AGE_SECONDS; full wipe on graceful shutdown. Crash orphans
-        # are covered by cleanup_old_caches() at startup in main().
         delete_cache=(CACHE_SWEEP_INTERVAL_SECONDS, CACHE_MAX_AGE_SECONDS),
     ) as demo:
-        gr.Markdown(
-            "# DLSS 5 Visual Enhancer",
-            elem_id="app-title",
-        )
+        gr.Markdown("# DLSS 5 Visual Enhancer", elem_id="app-title")
         with gr.Tabs(selected="neural-rendering"):
             with gr.Tab("Neural Rendering", id="neural-rendering"):
                 neural_rendering_tab = build_neural_rendering_tab(settings)
@@ -229,10 +221,8 @@ def build_app() -> gr.Blocks:
                 frame_tab = build_frame_interpolation_tab(settings)
             with gr.Tab("Live", id="live"):
                 live_tab = build_live_tab(settings)
-            with gr.Tab("Realtime", id="realtime"):
-                build_realtime_tab(settings)
             with gr.Tab("3D Viewer", id="model-viewer"):
-                build_model_viewer_tab()
+                build_model_viewer_tab(settings)
             with gr.Tab("Settings", id="settings"):
                 settings_tab = build_settings_tab(settings, ai_gpu_choices, video_gpu_choices)
             with gr.Tab("About", id="about"):
@@ -253,10 +243,8 @@ def main() -> None:
     OUTPUTS.mkdir(exist_ok=True)
     LOGS.mkdir(exist_ok=True)
     LIVE_DIR.mkdir(exist_ok=True)
-    # Drop leftover Live session dirs from dead runs (previous process is gone).
     try:
         from src.live.pipeline import sweep_stale_live_dirs
-
         sweep_stale_live_dirs()
     except Exception:
         pass
@@ -265,17 +253,13 @@ def main() -> None:
         clean_model_cache()
     except Exception:
         pass
-    # Remove stale Gradio caches / temp leftovers from previous (possibly
-    # crashed) runs before serving. Best effort: never blocks startup.
     try:
         cleanup_old_caches()
     except Exception:
         pass
-    # Reuse early loading UI if it was already rendered at import time (avoids second flash and keeps alt buffer)
     global _early_ui  # type: ignore
     if "_EARLY_UI" in globals() and _early_ui is not None and getattr(_early_ui, "_alt_active", False):
         ui = _early_ui  # type: ignore
-        # Complete init that early block did not do (listener + redirect)
         try:
             ui.start_input_listener()
         except Exception:
@@ -286,7 +270,6 @@ def main() -> None:
             pass
         try:
             import atexit
-
             atexit.register(ui.restore_cursor)
         except Exception:
             pass
@@ -300,7 +283,6 @@ def main() -> None:
         raise SystemExit(1) from exc
 
     demo = build_app()
-    # Replace loading screen with final DLSS 5 Visual Enhancer splash
     try:
         ui.render_screen()
     except Exception:
